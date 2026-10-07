@@ -50,6 +50,8 @@ struct Args {
     std::string store;               // --store <path>, empty = default resolution
     std::string parent;              // --parent <spec> (add)
     bool hasParent = false;
+    std::string tree;                // --tree <spec> (add, tree)
+    bool hasTree = false;
 };
 
 // Parse global + known flags out of argv, leaving positionals in order. Returns false and
@@ -67,6 +69,7 @@ bool parseArgs(const std::vector<std::string>& argv, Args& a, std::ostream& err)
         if (s == "--json") a.json = true;
         else if (s == "--store") { if (!needValue("--store", a.store)) return false; }
         else if (s == "--parent") { a.hasParent = true; if (!needValue("--parent", a.parent)) return false; }
+        else if (s == "--tree") { a.hasTree = true; if (!needValue("--tree", a.tree)) return false; }
         else if (s.size() > 2 && s[0] == '-' && s[1] == '-') { err << "unknown flag " << s << "\n"; return false; }
         else pos.push_back(s);
     }
@@ -162,6 +165,39 @@ Exit resolveNode(const Forest& f, const std::string& spec, TaskId& out, std::ost
     return kOk;
 }
 
+// Resolve a tree spec: a number is a tree id, anything else a name — an exact
+// (case-insensitive) name wins, otherwise the substring match must be unique.
+Exit resolveTree(const Forest& f, const std::string& spec, TreeId& out, std::ostream& err) {
+    if (allDigits(spec)) {
+        TreeId id = 0;
+        const char* end = spec.data() + spec.size();
+        if (std::from_chars(spec.data(), end, id).ec == std::errc{} && f.tree(id)) {
+            out = id;
+            return kOk;
+        }
+        err << "no tree with id " << spec << "\n";
+        return kNotFound;
+    }
+    auto lower = [](std::string x) {
+        for (char& c : x) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return x;
+    };
+    for (const Tree& t : f.trees)
+        if (lower(t.name) == lower(spec)) { out = t.id; return kOk; }
+    const std::vector<TreeId> matches = palette::rankTrees(f, spec);
+    if (matches.empty()) {
+        err << "no tree matches \"" << spec << "\"\n";
+        return kNotFound;
+    }
+    if (matches.size() > 1) {
+        err << "\"" << spec << "\" is ambiguous — " << matches.size() << " trees:\n";
+        for (TreeId id : matches) err << "  @" << id << " " << f.tree(id)->name << "\n";
+        return kAmbiguous;
+    }
+    out = matches.front();
+    return kOk;
+}
+
 // ---- serialisation ----------------------------------------------------------
 
 int ordOf(const Forest& f, const Task& t) {
@@ -185,6 +221,7 @@ json taskFields(const Forest& f, const Task& t, int ord) {
         {"collapsed", t.collapsed},
         {"created_at", t.createdAt},
         {"done_at", t.doneAt},
+        {"tree", t.tree},
     };
 }
 
@@ -226,15 +263,21 @@ void printHelp(std::ostream& out) {
         "  show <node>              one task and its immediate children\n"
         "  find <query>             ranked text matches, best first\n"
         "  deleted                  soft-deleted rows, newest first\n"
+        "  trees                    the trees (workspaces), in display order\n"
         "Write:\n"
-        "  add <text> [--parent <node>]   append a task (prints the new id)\n"
+        "  add <text> [--parent <node> | --tree <tree>]\n"
+        "                                 append a task (prints the new id); top-level tasks\n"
+        "                                 go to --tree, else the first tree\n"
         "  edit <node> <text>             replace a task's text\n"
         "  done <node> | undone <node>    set / clear completion (keeps its slot)\n"
         "  status <node> <normal|in-progress|priority>\n"
         "  parent <child> <parent>        reparent a subtree (refuses cycles)\n"
         "  rm <node>                      soft-delete a subtree (recoverable; see `deleted`)\n"
+        "  tree-add <name>                new tree with a root node of the same name\n"
+        "  move <node> <tree>             move a subtree to another tree's top level\n"
         "\n"
         "A <node> is a numeric id or a text query (unique match required; ambiguity is an error).\n"
+        "A <tree> is a tree id or name. `tree --tree <tree>` limits the outline to one tree.\n"
         "\n"
         "Global flags:\n"
         "  --json                   emit one JSON document on stdout (diagnostics stay on stderr)\n"
@@ -260,15 +303,65 @@ int cmdTree(const Args& a, const Forest& f, std::ostream& out, std::ostream& err
         else printOutline(f, id, 0, out);
         return kOk;
     }
+    TreeId only = 0;
+    if (a.hasTree)
+        if (const Exit e = resolveTree(f, a.tree, only, err); e != kOk) return e;
     if (a.json) {
+        // `ord` stays the slot in the global `roots` list, so it means what it does on disk.
         json arr = json::array();
         for (std::size_t i = 0; i < f.roots.size(); ++i)
-            arr.push_back(subtreeJson(f, f.roots[i], static_cast<int>(i)));
+            if (only == 0 || f.treeOf(f.roots[i]) == only)
+                arr.push_back(subtreeJson(f, f.roots[i], static_cast<int>(i)));
         out << arr.dump(2) << "\n";
     } else {
-        for (TaskId r : f.roots) printOutline(f, r, 0, out);
+        // One section per tree, headed only when there is more than one to tell apart.
+        const bool headed = only == 0 && f.trees.size() > 1;
+        for (const Tree& tr : f.trees) {
+            if (only != 0 && tr.id != only) continue;
+            if (headed) out << "@" << tr.id << " " << tr.name << "\n";
+            for (TaskId r : f.rootsOf(tr.id)) printOutline(f, r, headed ? 1 : 0, out);
+        }
     }
     return kOk;
+}
+
+int cmdTrees(const Args& a, const Forest& f, std::ostream& out) {
+    if (a.json) {
+        json arr = json::array();
+        for (const Tree& t : f.trees)
+            arr.push_back(json{{"id", t.id}, {"name", t.name}, {"roots", f.rootsOf(t.id).size()}});
+        out << arr.dump(2) << "\n";
+    } else {
+        for (const Tree& t : f.trees)
+            out << "@" << t.id << " " << t.name << "  (" << f.rootsOf(t.id).size() << " roots)\n";
+    }
+    return kOk;
+}
+
+int cmdTreeAdd(const Args& a, const std::string& path, Forest& baseline, std::ostream& out,
+               std::ostream& err) {
+    if (a.rest.empty() || a.rest.front().empty()) { err << "tree-add needs a name\n"; return kUsage; }
+    Forest work = baseline;
+    const TreeId tree = work.addTree(a.rest.front());
+    const TaskId root = work.addTask(a.rest.front(), kNoParent, nowMs(), tree);
+    if (const Exit e = saveStore(work, path, baseline, err); e != kOk) return e;
+    if (a.json) out << json{{"tree", tree}, {"root", root}}.dump() << "\n";
+    else out << tree << " " << root << "\n";
+    return kOk;
+}
+
+int cmdMove(const Args& a, const std::string& path, Forest& baseline, std::ostream& err) {
+    if (a.rest.size() < 2) { err << "move needs a node and a tree\n"; return kUsage; }
+    Forest work = baseline;
+    TaskId id = 0;
+    TreeId tree = 0;
+    if (const Exit e = resolveNode(work, a.rest[0], id, err); e != kOk) return e;
+    if (const Exit e = resolveTree(work, a.rest[1], tree, err); e != kOk) return e;
+    if (!work.moveToTree(id, tree)) {
+        err << "#" << id << " is already a top-level task of @" << tree << "\n";
+        return kUsage;
+    }
+    return saveStore(work, path, baseline, err);
 }
 
 int cmdShow(const Args& a, const Forest& f, std::ostream& out, std::ostream& err) {
@@ -323,10 +416,14 @@ int cmdAdd(const Args& a, const std::string& path, Forest& baseline, std::ostrea
     if (a.rest.empty()) { err << "add needs text\n"; return kUsage; }
     Forest work = baseline;
     TaskId parentId = kNoParent;
+    if (a.hasParent && a.hasTree) { err << "add takes --parent or --tree, not both\n"; return kUsage; }
     if (a.hasParent) {
         if (const Exit e = resolveNode(work, a.parent, parentId, err); e != kOk) return e;
     }
-    const TaskId id = work.addTask(a.rest.front(), parentId, nowMs());
+    TreeId tree = work.trees.empty() ? kDefaultTree : work.trees.front().id;
+    if (a.hasTree)
+        if (const Exit e = resolveTree(work, a.tree, tree, err); e != kOk) return e;
+    const TaskId id = work.addTask(a.rest.front(), parentId, nowMs(), tree);
     if (const Exit e = saveStore(work, path, baseline, err); e != kOk) return e;
     if (a.json) out << json{{"id", id}}.dump() << "\n";
     else out << id << "\n";
@@ -433,6 +530,9 @@ int run(const std::vector<std::string>& argv, std::ostream& out, std::ostream& e
     if (a.command == "status") return cmdStatus(a, path, forest, err);
     if (a.command == "parent") return cmdParent(a, path, forest, err);
     if (a.command == "rm")     return cmdRm(a, path, forest, err);
+    if (a.command == "trees")  return cmdTrees(a, forest, out);
+    if (a.command == "tree-add") return cmdTreeAdd(a, path, forest, out, err);
+    if (a.command == "move")   return cmdMove(a, path, forest, err);
 
     err << "unknown command \"" << a.command << "\" (try --help)\n";
     return kUsage;

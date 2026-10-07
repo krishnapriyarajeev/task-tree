@@ -14,6 +14,18 @@ using TaskId = std::uint64_t;
 // A parent id of 0 means "no parent" — the task is a top-level root.
 constexpr TaskId kNoParent = 0;
 
+// A tree (workspace): a named canvas holding its own top-level tasks. Every task belongs
+// to exactly one, and a task always shares its root's tree — the field is carried on every
+// node (not just roots) so "which tree is this in?" is a lookup rather than a walk, and
+// the Forest operations below keep it in step whenever a subtree moves.
+using TreeId = std::uint64_t;
+constexpr TreeId kDefaultTree = 1;   // where everything predating trees lives ("main")
+
+struct Tree {
+    TreeId id = 0;
+    std::string name;
+};
+
 // `doneAt` for a task that is done but whose completion time isn't known — tasks completed
 // before the date was recorded. It has to be distinguishable from "not done" (0) without
 // inventing a completion date, so done-ness is `doneAt != 0`, not `doneAt > 0`.
@@ -34,6 +46,7 @@ struct Task {
     // canvas layout skips done subtrees, so un-doing puts a task back exactly where it was,
     // because it never left.
     std::int64_t doneAt = 0;
+    TreeId tree = kDefaultTree;     // always equals its root's tree (see Tree above)
 
     bool isDone() const { return doneAt != 0; }
 };
@@ -43,7 +56,8 @@ struct Task {
 class Forest {
 public:
     std::unordered_map<TaskId, Task> nodes;
-    std::vector<TaskId> roots;      // top-level tasks (parent == kNoParent), done or not
+    std::vector<TaskId> roots;      // top-level tasks (parent == kNoParent), done or not, ALL trees
+    std::vector<Tree> trees{{kDefaultTree, "main"}};  // display order; never empty (normalizeTrees)
     TaskId nextId = 1;
 
     Task*       get(TaskId id)       { auto it = nodes.find(id); return it == nodes.end() ? nullptr : &it->second; }
@@ -52,8 +66,26 @@ public:
     std::size_t size() const { return nodes.size(); }
 
     // Create a task with a fresh id. If `parent` is a real node the task is appended
-    // to its children, otherwise it becomes a new root. Returns the new id.
-    TaskId addTask(std::string text, TaskId parent = kNoParent, std::int64_t createdAt = 0);
+    // to its children (and joins the parent's tree), otherwise it becomes a new root of
+    // `tree`. Returns the new id.
+    TaskId addTask(std::string text, TaskId parent = kNoParent, std::int64_t createdAt = 0,
+                   TreeId tree = kDefaultTree);
+
+    // ---- trees ----
+    const Tree* tree(TreeId id) const;
+    // Append a new, empty tree and return its id (one past the largest in use).
+    TreeId addTree(std::string name);
+    // The tree `id` belongs to (kDefaultTree for an unknown id).
+    TreeId treeOf(TaskId id) const;
+    // Top-level tasks of `tree`, in order, done ones included (like `roots`).
+    std::vector<TaskId> rootsOf(TreeId tree) const;
+    // Move the subtree at `id` into `tree` as its last top-level task. Returns false for
+    // an unknown task/tree, or when `id` is already a top-level task of that tree.
+    bool moveToTree(TaskId id, TreeId tree);
+    // Make the tree data consistent: at least one tree exists (kDefaultTree, "main"), a task
+    // naming a tree that doesn't exist falls back to the first one, and every descendant
+    // carries its root's tree. Run by the loaders after the parent/children edges are built.
+    void normalizeTrees();
 
     // Is `node` inside the subtree rooted at `ancestor` (walking parent links up)?
     // Returns true when node == ancestor as well.
@@ -69,9 +101,12 @@ public:
     // parent's children list. Ordered newest-completed first (doneAt, then id descending
     // for tasks completed before doneAt was recorded).
     std::vector<TaskId> doneSectionRoots() const;
+    // The same, restricted to one tree.
+    std::vector<TaskId> doneSectionRoots(TreeId tree) const;
 
     // Move `child` under `newParent` (kNoParent → make it a root) at position `index`
-    // among the destination's children (clamped). Rejects moves that would create a
+    // among the destination's children (clamped). Under a parent the subtree joins the
+    // parent's tree; made a root, it stays in the tree it was already in. Rejects moves that would create a
     // cycle (dropping a node onto itself or one of its own descendants). Returns
     // false if the move was rejected or ids are invalid.
     bool reparent(TaskId child, TaskId newParent, int index);
@@ -105,9 +140,10 @@ public:
 private:
     void detachFromParent(TaskId child); // remove id from its current parent/roots list
     void collectSubtree(TaskId id, std::vector<TaskId>& out) const;
+    void setSubtreeTree(TaskId id, TreeId tree);
 };
 
-// Deep equality: same ids, same nextId, same roots order, and every Task field (including
+// Deep equality: same ids, same nextId, same roots order, same trees, and every Task field (including
 // children order) identical. Deliberately exact — a store migration uses it to prove a
 // round-trip lost nothing, so "close enough" would defeat the point.
 bool equivalent(const Forest& a, const Forest& b);

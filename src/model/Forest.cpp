@@ -14,7 +14,7 @@ bool eraseId(std::vector<TaskId>& vec, TaskId id) {
 }
 } // namespace
 
-TaskId Forest::addTask(std::string text, TaskId parent, std::int64_t createdAt) {
+TaskId Forest::addTask(std::string text, TaskId parent, std::int64_t createdAt, TreeId tree) {
     const TaskId id = nextId++;
     Task t;
     t.id = id;
@@ -23,6 +23,7 @@ TaskId Forest::addTask(std::string text, TaskId parent, std::int64_t createdAt) 
 
     Task* p = (parent != kNoParent) ? get(parent) : nullptr;
     t.parent = p ? parent : kNoParent;
+    t.tree = p ? p->tree : tree;
     nodes.emplace(id, std::move(t));
 
     if (p) p->children.push_back(id);
@@ -55,10 +56,13 @@ bool Forest::isInDoneSection(TaskId node) const {
     return false;
 }
 
-std::vector<TaskId> Forest::doneSectionRoots() const {
+std::vector<TaskId> Forest::doneSectionRoots() const { return doneSectionRoots(0); }
+
+std::vector<TaskId> Forest::doneSectionRoots(TreeId tree) const {
     std::vector<TaskId> out;
     for (const auto& [id, t] : nodes)
-        if (t.isDone() && !isInDoneSection(t.parent)) out.push_back(id);
+        if (t.isDone() && (tree == 0 || t.tree == tree) && !isInDoneSection(t.parent))
+            out.push_back(id);
     // Newest completion first. Tasks finished before doneAt existed have doneAt == 0 and
     // fall back to id order (later id = created later = almost certainly finished later).
     std::sort(out.begin(), out.end(), [this](TaskId a, TaskId b) {
@@ -96,7 +100,62 @@ bool Forest::reparent(TaskId child, TaskId newParent, int index) {
     const int clamped = std::max(0, std::min(index, static_cast<int>(dest.size())));
     dest.insert(dest.begin() + clamped, child);
     get(child)->parent = newParent;
+    if (newParent != kNoParent) setSubtreeTree(child, get(newParent)->tree);
     return true;
+}
+
+void Forest::setSubtreeTree(TaskId id, TreeId tree) {
+    std::vector<TaskId> sub;
+    collectSubtree(id, sub);
+    for (TaskId s : sub) get(s)->tree = tree;
+}
+
+const Tree* Forest::tree(TreeId id) const {
+    for (const Tree& t : trees)
+        if (t.id == id) return &t;
+    return nullptr;
+}
+
+TreeId Forest::addTree(std::string name) {
+    TreeId id = 0;
+    for (const Tree& t : trees) id = std::max(id, t.id);
+    // Tasks can name a tree before the list knows it (an un-normalized forest): never
+    // hand out an id they already use.
+    for (const auto& [tid, t] : nodes) id = std::max(id, t.tree);
+    trees.push_back({id + 1, std::move(name)});
+    return id + 1;
+}
+
+TreeId Forest::treeOf(TaskId id) const {
+    const Task* t = get(id);
+    return t ? t->tree : kDefaultTree;
+}
+
+std::vector<TaskId> Forest::rootsOf(TreeId tree) const {
+    std::vector<TaskId> out;
+    for (TaskId r : roots)
+        if (const Task* t = get(r); t && t->tree == tree) out.push_back(r);
+    return out;
+}
+
+bool Forest::moveToTree(TaskId id, TreeId treeId) {
+    Task* t = get(id);
+    if (!t || !tree(treeId)) return false;
+    if (t->parent == kNoParent && t->tree == treeId) return false;
+    detachFromParent(id);
+    roots.push_back(id);
+    setSubtreeTree(id, treeId);
+    return true;
+}
+
+void Forest::normalizeTrees() {
+    if (trees.empty()) trees.push_back({kDefaultTree, "main"});
+    const TreeId fallback = trees.front().id;
+    for (TaskId r : roots) {
+        Task* t = get(r);
+        if (!t) continue;
+        setSubtreeTree(r, tree(t->tree) ? t->tree : fallback);
+    }
 }
 
 void Forest::collectSubtree(TaskId id, std::vector<TaskId>& out) const {
@@ -142,6 +201,9 @@ bool Forest::restoreFromDone(TaskId id) {
 bool equivalent(const Forest& a, const Forest& b) {
     if (a.nextId != b.nextId) return false;
     if (a.roots != b.roots) return false;
+    if (a.trees.size() != b.trees.size()) return false;
+    for (std::size_t i = 0; i < a.trees.size(); ++i)
+        if (a.trees[i].id != b.trees[i].id || a.trees[i].name != b.trees[i].name) return false;
     if (a.nodes.size() != b.nodes.size()) return false;
     for (const auto& [id, ta] : a.nodes) {
         const Task* tb = b.get(id);
@@ -149,7 +211,7 @@ bool equivalent(const Forest& a, const Forest& b) {
         if (ta.id != tb->id || ta.parent != tb->parent || ta.text != tb->text ||
             ta.collapsed != tb->collapsed || ta.status != tb->status ||
             ta.createdAt != tb->createdAt || ta.doneAt != tb->doneAt ||
-            ta.children != tb->children)
+            ta.tree != tb->tree || ta.children != tb->children)
             return false;
     }
     return true;

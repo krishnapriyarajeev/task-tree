@@ -233,6 +233,54 @@ int main() {
         CHECK(f.get(p)->children.size() == 2, "the done parent lost that child");
     }
 
+    { // Trees: a subtree always shares its root's tree, through every move.
+        std::printf("[model] trees\n");
+        Forest f;
+        CHECK(f.trees.size() == 1 && f.trees[0].name == "main", "a forest starts with 'main'");
+        const TaskId a = f.addTask("a");
+        const TaskId a1 = f.addTask("a1", a);
+        const TreeId side = f.addTree("side");
+        CHECK(side == 2 && f.tree(side) && f.tree(side)->name == "side", "addTree");
+        const TaskId b = f.addTask("b", kNoParent, 0, side);
+        const TaskId b1 = f.addTask("b1", b);
+        CHECK(f.treeOf(b) == side && f.treeOf(b1) == side, "a child joins its parent's tree");
+        CHECK(f.rootsOf(kDefaultTree) == std::vector<TaskId>{a}, "rootsOf main");
+        CHECK(f.rootsOf(side) == std::vector<TaskId>{b}, "rootsOf side");
+
+        CHECK(f.reparent(a, b1, 0), "drop a under b1");
+        CHECK(f.treeOf(a) == side && f.treeOf(a1) == side, "the whole subtree changed tree");
+        CHECK(f.reparent(a, kNoParent, 99), "back to the top level");
+        CHECK(f.treeOf(a) == side, "a made-root keeps the tree it was in");
+
+        CHECK(f.moveToTree(a, kDefaultTree), "moveToTree");
+        CHECK(f.get(a)->parent == kNoParent && f.rootsOf(kDefaultTree) == std::vector<TaskId>{a},
+              "lands as a top-level task of the target");
+        CHECK(f.treeOf(a1) == kDefaultTree, "with its descendants");
+        CHECK(!f.moveToTree(a, kDefaultTree), "already a root there: no-op");
+        CHECK(!f.moveToTree(a, 42), "unknown tree refused");
+        CHECK(f.moveToTree(b1, kDefaultTree) && f.get(b)->children.empty(),
+              "a mid-tree node is detached from its old parent");
+
+        f.markDone(a1);
+        f.markDone(b);
+        CHECK(f.doneSectionRoots(kDefaultTree) == std::vector<TaskId>{a1}, "DONE per tree");
+        CHECK(f.doneSectionRoots(side) == std::vector<TaskId>{b}, "DONE per tree (side)");
+        CHECK(f.doneSectionRoots().size() == 2, "unfiltered DONE sees both");
+
+        Forest g = f;
+        CHECK(equivalent(f, g), "copies are equivalent");
+        g.trees[1].name = "renamed";
+        CHECK(!equivalent(f, g), "a tree rename is a difference");
+
+        // normalizeTrees: stray tree ids fall back to the first tree; children follow roots.
+        Forest h;
+        const TaskId r = h.addTask("r", kNoParent, 0, 9);
+        const TaskId c = h.addTask("c", r);
+        h.get(c)->tree = 5;
+        h.normalizeTrees();
+        CHECK(h.treeOf(r) == kDefaultTree && h.treeOf(c) == kDefaultTree, "normalizeTrees");
+    }
+
     { // repairAfterLoad: `parent` and `children` are two encodings of one edge, and a file
       // can disagree with itself. Nothing may end up existing-but-unreachable.
         Forest f;
@@ -396,7 +444,18 @@ int main() {
         CHECK(infoFor(Mode::Find)->prefix == '?', "find's symbol");
         CHECK(std::string(infoFor(Mode::Select)->name) == "select", "select's chip label");
         CHECK(infoFor(Mode::Add) == nullptr, "add has no chip");
-        CHECK(modes().size() == 3, "three modes are offered in the menu");
+        CHECK(modes().size() == 5, "five modes are offered in the menu");
+        CHECK(modeForPrefix('@') == Mode::Tree, "@ -> tree switcher");
+        CHECK(modeForPrefix('+') == Mode::NewTree, "+ -> new tree");
+
+        CHECK(interpret(Mode::Tree, " wo ").kind == Kind::SwitchTree, "tree mode -> switch");
+        CHECK(interpret(Mode::Tree, " wo ").query == "wo", "switch query trimmed");
+        CHECK(interpret(Mode::NewTree, " side ").kind == Kind::NewTree, "new tree");
+        CHECK(interpret(Mode::NewTree, " side ").body == "side", "new tree name trimmed");
+        CHECK(interpret(Mode::Parent, "@ work").kind == Kind::MoveToTree, ">@ -> move to tree");
+        CHECK(interpret(Mode::Parent, "@ work").query == "work", "move query trimmed");
+        CHECK(interpret(Mode::Parent, "@").picksTree(), "bare >@ lists trees");
+        CHECK(interpret(Mode::Parent, "x@y").kind == Kind::ParentText, "@ mid-text is text");
 
         CHECK(interpret(Mode::Add, "buy milk").kind == Kind::AddTask, "add mode -> add");
         CHECK(interpret(Mode::Add, "buy milk").body == "buy milk", "add keeps the text");
@@ -477,6 +536,24 @@ int main() {
     }
 
     { // shortDate: the tiny chip date ("jul 27", year added only when it differs)
+        { // tree ranking + per-tree node search
+            using namespace tt::palette;
+            Forest f;
+            const TreeId work = f.addTree("work");
+            const TreeId home = f.addTree("homework");
+            CHECK((rankTrees(f, "") == std::vector<TreeId>{kDefaultTree, work, home}),
+                  "empty query lists every tree in order");
+            CHECK((rankTrees(f, "WORK") == std::vector<TreeId>{work, home}),
+                  "prefix match and the tighter name first");
+            CHECK(rankTrees(f, "zzz").empty(), "no match");
+            const TaskId a = f.addTask("alpha", kNoParent, 0, work);
+            const TaskId b = f.addTask("alpha two");
+            CHECK(rankMatches(f, "alpha").size() == 2, "0 searches every tree");
+            CHECK((rankMatches(f, "alpha", 0, work) == std::vector<TaskId>{a}), "work only");
+            CHECK((rankMatches(f, "alpha", 0, kDefaultTree) == std::vector<TaskId>{b}),
+                  "main only");
+        }
+
         std::printf("[dates] shortDate\n");
         // Build inputs FROM local calendar dates, so the expectations hold in any TZ.
         auto ms = [](int y, int mon, int d) {

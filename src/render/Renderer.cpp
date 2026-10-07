@@ -704,6 +704,94 @@ void Renderer::drawPalette(const Rect& inputBox,
     nvgFontSize(vg_, fontSize_);   // leave the shared context as we found it
 }
 
+void Renderer::drawTreePicker(const TreePickerLayout& L, const Config& cfg) {
+    nvgFontFaceId(vg_, font_);
+    nvgFontSize(vg_, fontSize_);
+    nvgTextAlign(vg_, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+
+    // A small downward chevron (drawn, not a glyph — the UI font may not carry ▾).
+    auto chevron = [&](float cx, float cy, float s, bool up, const NVGcolor& c) {
+        const float d = up ? -1.f : 1.f;
+        nvgBeginPath(vg_);
+        nvgMoveTo(vg_, cx - s, cy - d * s * 0.5f);
+        nvgLineTo(vg_, cx, cy + d * s * 0.5f);
+        nvgLineTo(vg_, cx + s, cy - d * s * 0.5f);
+        nvgStrokeColor(vg_, c);
+        nvgStrokeWidth(vg_, 1.8f);
+        nvgLineCap(vg_, NVG_ROUND);
+        nvgLineJoin(vg_, NVG_ROUND);
+        nvgStroke(vg_);
+    };
+
+    // Button: same chrome as the input bar, so it reads as part of the same HUD.
+    const Rect& b = L.button;
+    Color border = cfg.nodeBorder;
+    if (!L.open && !L.buttonHovered) border.a *= 0.45f;   // quiet until you reach for it
+    drawFieldChrome(b.x, b.y, b.w, b.h, cfg, border);
+    nvgFillColor(vg_, col(cfg.nodeText, 0.55f));
+    nvgFontSize(vg_, fontSize_ * 0.72f);
+    nvgText(vg_, b.x + padX_, b.y + b.h * 0.5f, "TREE", nullptr);
+    const float labelW = nvgTextBounds(vg_, 0, 0, "TREE", nullptr, nullptr);
+    nvgFontSize(vg_, fontSize_);
+    const float nameX = b.x + padX_ + labelW + 10.f;
+    const std::string name = fitText(L.current, b.right() - 30.f - nameX);
+    nvgFillColor(vg_, col(cfg.nodeText));
+    nvgText(vg_, nameX, b.y + b.h * 0.5f, name.c_str(), end(name));
+    chevron(b.right() - 16.f, b.y + b.h * 0.5f, 4.5f, L.open, col(cfg.nodeText, 0.75f));
+
+    if (!L.open || L.rows.empty()) return;
+
+    const Rect& c = L.card;
+    drawFieldChrome(c.x, c.y, c.w, c.h, cfg, cfg.nodeBorder);
+    for (std::size_t i = 0; i < L.rows.size(); ++i) {
+        const Rect& r = L.rows[i];
+        const bool isNew = i + 1 == L.rows.size();
+        const bool hov = static_cast<int>(i) == L.hoveredRow;
+        if (isNew) {   // hairline above the action row
+            nvgBeginPath(vg_);
+            nvgMoveTo(vg_, c.x + 10.f, r.y - 1.f);
+            nvgLineTo(vg_, c.right() - 10.f, r.y - 1.f);
+            nvgStrokeColor(vg_, col(cfg.nodeBorder, 0.25f));
+            nvgStrokeWidth(vg_, 1.f);
+            nvgStroke(vg_);
+        }
+        if (hov) {
+            nvgBeginPath(vg_);
+            nvgRoundedRect(vg_, r.x, r.y, r.w, r.h, cfg.cornerRadius * 0.6f);
+            nvgFillColor(vg_, col(cfg.nodeBorder, 0.18f));
+            nvgFill(vg_);
+        }
+        const float ty = r.y + r.h * 0.5f;
+        if (isNew) {
+            nvgFillColor(vg_, col(cfg.dropHint, hov ? 1.f : 0.8f));
+            nvgText(vg_, r.x + 10.f, ty, "+  New tree", nullptr);
+            continue;
+        }
+        if (static_cast<int>(i) == L.currentRow) {   // check mark on the current tree
+            nvgBeginPath(vg_);
+            nvgMoveTo(vg_, r.x + 9.f, ty);
+            nvgLineTo(vg_, r.x + 13.f, ty + 4.f);
+            nvgLineTo(vg_, r.x + 20.f, ty - 4.f);
+            nvgStrokeColor(vg_, col(cfg.doneTitle));
+            nvgStrokeWidth(vg_, 2.f);
+            nvgLineCap(vg_, NVG_ROUND);
+            nvgLineJoin(vg_, NVG_ROUND);
+            nvgStroke(vg_);
+        }
+        const std::string n = fitText(i < L.names.size() ? L.names[i] : std::string{},
+                                      r.w - 40.f);
+        nvgFillColor(vg_, col(cfg.nodeText, (hov || static_cast<int>(i) == L.currentRow) ? 1.f : 0.7f));
+        nvgText(vg_, r.x + 30.f, ty, n.c_str(), end(n));
+    }
+    if (!L.hint.empty()) {
+        nvgFontSize(vg_, fontSize_ * 0.72f);
+        nvgFillColor(vg_, col(cfg.nodeText, 0.4f));
+        nvgText(vg_, c.x + padX_, c.bottom() - fontSize_ * 0.72f * 0.5f - 8.f,
+                L.hint.c_str(), end(L.hint));
+        nvgFontSize(vg_, fontSize_);
+    }
+}
+
 float Renderer::measureTextWidth(const std::string& text) const {
     if (text.empty()) return 0.f;
     nvgFontFaceId(vg_, font_);

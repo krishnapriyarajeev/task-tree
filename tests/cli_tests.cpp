@@ -163,6 +163,40 @@ int main() {
     }
 
     // ---- reparent, and cycle refusal -------------------------------------------
+    { // trees: tree-add / trees / move / add --tree / tree --tree
+        std::printf("[cli] trees\n");
+        const std::string db = tmpFile("trees.db").string();
+        removeDb(db);
+        const TaskId a = add(db, "alpha");
+        const TaskId a1 = add(db, "alpha child", a);
+        Res r = call({"tree-add", "work", "--store", db});
+        CHECK(r.code == cli::kOk, "tree-add ok");
+        CHECK(r.out.rfind("2 ", 0) == 0, "prints the new tree id first");
+        r = call({"trees", "--store", db});
+        CHECK(r.out.find("@1 main") != std::string::npos && r.out.find("@2 work") != std::string::npos,
+              "trees lists both");
+        CHECK(call({"move", std::to_string(a), "work", "--store", db}).code == cli::kOk, "move");
+        Forest f;
+        CHECK(store::load(f, db), "load");
+        CHECK(f.treeOf(a) == 2 && f.treeOf(a1) == 2, "the subtree moved");
+        CHECK(call({"move", std::to_string(a), "work", "--store", db}).code == cli::kUsage,
+              "moving into the tree it is already top-level in is refused");
+        CHECK(call({"move", std::to_string(a), "nope", "--store", db}).code == cli::kNotFound,
+              "unknown tree");
+        r = call({"add", "loose", "--tree", "WORK", "--store", db});
+        CHECK(r.code == cli::kOk, "add --tree (case-insensitive name)");
+        Forest g;
+        store::load(g, db);
+        CHECK(g.treeOf(static_cast<TaskId>(std::stoull(r.out))) == 2, "landed in work");
+        r = call({"tree", "--tree", "main", "--store", db});
+        CHECK(r.out.find("alpha") == std::string::npos, "tree --tree main hides work's tasks");
+        r = call({"tree", "--store", db});
+        CHECK(r.out.find("@2 work") != std::string::npos, "full outline is headed per tree");
+        CHECK(call({"add", "x", "--tree", "1", "--parent", "1", "--store", db}).code == cli::kUsage,
+              "--tree with --parent refused");
+        removeDb(db);
+    }
+
     {
         const std::string db = tmpFile("reparent.db").string();
         removeDb(db);

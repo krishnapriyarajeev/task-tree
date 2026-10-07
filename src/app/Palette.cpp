@@ -44,7 +44,11 @@ const std::vector<ModeInfo>& modes() {
         {Mode::Select, ':', "select", "select a node — its id, or text to match",
          "node id, or text to match…"},
         {Mode::Parent, '>', "parent", "make a node the parent of the selected one",
-         "node id, or text to match…"},
+         "node id, text to match, or @tree…"},
+        {Mode::Tree, '@', "tree", "switch to another tree (a new name creates it)",
+         "tree name…"},
+        {Mode::NewTree, '+', "new tree", "create a tree with a root node",
+         "name of the new tree…"},
     };
     return kModes;
 }
@@ -76,9 +80,24 @@ Command interpret(Mode mode, const std::string& arg) {
             c.kind = Kind::Find;
             c.query = trim(arg);
             return c;
+        case Mode::Tree:
+            c.kind = Kind::SwitchTree;
+            c.query = trim(arg);
+            return c;
+        case Mode::NewTree:
+            c.kind = Kind::NewTree;
+            c.body = trim(arg);
+            return c;
         case Mode::Select:
         case Mode::Parent:
             break;
+    }
+
+    // '>@name': the destination is a tree, not a node.
+    if (mode == Mode::Parent && !arg.empty() && arg[0] == '@') {
+        c.kind = Kind::MoveToTree;
+        c.query = trim(arg.substr(1));
+        return c;
     }
 
     // Select / Parent: digits mean "by id", anything else is a text query. A leading '?'
@@ -96,7 +115,8 @@ Command interpret(Mode mode, const std::string& arg) {
     return c;
 }
 
-std::vector<TaskId> rankMatches(const Forest& f, const std::string& query, std::size_t limit) {
+std::vector<TaskId> rankMatches(const Forest& f, const std::string& query, std::size_t limit,
+                                TreeId tree) {
     std::vector<TaskId> out;
     const std::string q = lower(trim(query));
     if (q.empty()) return out;
@@ -109,6 +129,7 @@ std::vector<TaskId> rankMatches(const Forest& f, const std::string& query, std::
     std::vector<Hit> hits;
     for (const auto& [id, t] : f.nodes) {
         if (f.isInDoneSection(id)) continue;
+        if (tree != 0 && t.tree != tree) continue;
         const std::string lt = lower(t.text);
         const std::size_t pos = lt.find(q);
         if (pos == std::string::npos) continue;
@@ -123,6 +144,26 @@ std::vector<TaskId> rankMatches(const Forest& f, const std::string& query, std::
     const std::size_t n = (limit == 0) ? hits.size() : std::min(limit, hits.size());
     out.reserve(n);
     for (std::size_t i = 0; i < n; ++i) out.push_back(hits[i].id);
+    return out;
+}
+
+std::vector<TreeId> rankTrees(const Forest& f, const std::string& query) {
+    std::vector<TreeId> out;
+    const std::string q = lower(trim(query));
+    struct Hit { std::size_t pos, len, order; TreeId id; };
+    std::vector<Hit> hits;
+    for (std::size_t i = 0; i < f.trees.size(); ++i) {
+        const std::string ln = lower(f.trees[i].name);
+        const std::size_t pos = q.empty() ? 0 : ln.find(q);
+        if (pos == std::string::npos) continue;
+        hits.push_back({pos, q.empty() ? 0 : ln.size(), i, f.trees[i].id});
+    }
+    std::stable_sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) {
+        if (a.pos != b.pos) return a.pos < b.pos;
+        if (a.len != b.len) return a.len < b.len;
+        return a.order < b.order;
+    });
+    for (const Hit& h : hits) out.push_back(h.id);
     return out;
 }
 

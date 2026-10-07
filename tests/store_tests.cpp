@@ -485,7 +485,7 @@ int main() {
         CHECK(g.get(1) && g.get(1)->text == "old root", "old data intact");
         CHECK(g.get(2) && g.get(2)->parent == 1, "old parent link intact");
         CHECK(g.nextId == 6, "old next_id intact");
-        CHECK(rawUserVersion(db) == 3, "user_version bumped to 3");
+        CHECK(rawUserVersion(db) == store::supportedDbSchemaVersion(), "user_version bumped");
         CHECK(rawCount(db, "deleted_at=0") == 5, "existing rows are marked live");
 
         CHECK(g.get(3) && g.get(3)->isDone(), "a dated done task is still done");
@@ -495,6 +495,72 @@ int main() {
         CHECK(g.get(5) && !g.get(5)->isDone(), "a not-done row with a stale date is not done");
         CHECK(g.get(5)->doneAt == 0, "its meaningless timestamp was cleared");
         CHECK(g.doneSectionRoots().size() == 2, "both done tasks head DONE entries");
+        removeDb(db);
+    }
+
+    // ---- Schema upgrade 3 -> 4 (trees): everything lands in tree 1, "main" ---------
+    {
+        const std::string db = tmpFile("schema_v3.db").string();
+        removeDb(db);
+        {
+            sqlite3* h = nullptr;
+            CHECK(sqlite3_open(db.c_str(), &h) == SQLITE_OK, "create a v3 DB");
+            const char* v3 =
+                "CREATE TABLE tasks(id INTEGER PRIMARY KEY, parent INTEGER NOT NULL DEFAULT 0,"
+                " ord INTEGER NOT NULL DEFAULT 0, text TEXT NOT NULL DEFAULT '',"
+                " collapsed INTEGER NOT NULL DEFAULT 0, status INTEGER NOT NULL DEFAULT 0,"
+                " created_at INTEGER NOT NULL DEFAULT 0, done_at INTEGER NOT NULL DEFAULT 0,"
+                " deleted_at INTEGER NOT NULL DEFAULT 0);"
+                "CREATE TABLE meta(key TEXT PRIMARY KEY, value NOT NULL);"
+                "INSERT INTO tasks(id,parent,ord,text,done_at) VALUES"
+                "  (1,0,0,'root',0),(2,1,0,'child',0),(3,0,1,'done root',-1);"
+                "INSERT INTO meta VALUES('next_id',4);"
+                "PRAGMA user_version=3;";
+            CHECK(sqlite3_exec(h, v3, nullptr, nullptr, nullptr) == SQLITE_OK, "seed v3 rows");
+            sqlite3_close(h);
+        }
+        Forest g;
+        CHECK(store::loadDb(g, db), "a v3 DB still loads");
+        CHECK(g.size() == 3, "every v3 row survived");
+        CHECK(rawUserVersion(db) == 4, "user_version bumped to 4");
+        CHECK(g.trees.size() == 1 && g.trees[0].id == kDefaultTree && g.trees[0].name == "main",
+              "the existing tasks form the 'main' tree");
+        CHECK(g.treeOf(1) == kDefaultTree && g.treeOf(2) == kDefaultTree &&
+              g.treeOf(3) == kDefaultTree, "every task is in it");
+        CHECK(g.get(3)->doneAt == kDoneAtUnknown, "done state untouched");
+
+        // Trees round-trip, and an incremental save carries a new tree + a moved subtree.
+        Forest base = g;
+        const TreeId side = g.addTree("side");
+        CHECK(g.moveToTree(1, side), "move the root to the new tree");
+        CHECK(store::saveDb(g, db, &base), "incremental save with a new tree");
+        Forest h;
+        CHECK(store::loadDb(h, db), "reload");
+        CHECK(equivalent(g, h), "trees + task trees round-trip exactly");
+        CHECK(h.treeOf(2) == side, "the child followed its root");
+
+        // Undoing the creation (tree + its tasks gone from the forest) retires the tree row.
+        Forest undone = base;
+        CHECK(store::saveDb(undone, db, &h), "save the undone state");
+        Forest k;
+        CHECK(store::loadDb(k, db), "reload after undo");
+        CHECK(k.trees.size() == 1 && !k.tree(side), "the undone tree does not come back");
+        CHECK(equivalent(k, undone), "undone state round-trips");
+        removeDb(db);
+    }
+
+    // ---- current_tree lives in meta, outside the Forest ---------------------------
+    {
+        const std::string db = tmpFile("current_tree.db").string();
+        removeDb(db);
+        Forest f;
+        f.addTask("x");
+        store::Session s(db);
+        CHECK(s.save(f), "create the store");
+        CHECK(s.currentTree() == 0, "unset -> 0");
+        CHECK(s.setCurrentTree(7) && s.currentTree() == 7, "set + read back");
+        store::Session s2(db);
+        CHECK(s2.currentTree() == 7, "survives a new connection");
         removeDb(db);
     }
 

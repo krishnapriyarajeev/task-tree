@@ -53,6 +53,22 @@ struct DonePanelLayout {
     int   itemCount = 0;      // total completed tasks (shown as a count badge)
 };
 
+// The tree (workspace) picker in the top-left corner, laid out by App (screen coords). The
+// button names the current tree; when open, a card below it lists every tree (the current
+// one checked) and ends with a "+ New tree" row.
+struct TreePickerLayout {
+    Rect button;
+    std::string current;               // name on the button
+    bool open = false;
+    Rect card;                         // the open list's background
+    std::vector<Rect> rows;            // one per tree, then the "+ New tree" row last
+    std::vector<std::string> names;    // tree names, parallel to rows (minus the last)
+    int currentRow = -1;               // the checked row
+    int hoveredRow = -1;               // row under the cursor (-1 = none)
+    bool buttonHovered = false;
+    std::string hint;                  // key legend on the card's footer line
+};
+
 // One visible row in the DONE panel's expandable, indented tree.
 struct DoneRow {
     TaskId id = 0;
@@ -116,6 +132,11 @@ public:
                      const std::vector<std::pair<std::string, std::string>>& rows, int activeRow,
                      int moreCount, const std::string& hint, const Color& tint,
                      const Config& cfg);
+
+    // The tree picker (see TreePickerLayout): button always, list card when open.
+    void drawTreePicker(const TreePickerLayout& layout, const Config& cfg);
+    // Height of the picker's rows / button, so App can lay it out before drawing.
+    float treePickerRowHeight() const { return fontSize_ + 14.f; }
 
     // The DONE side panel: a floating rounded card (drop shadow + subtle border, dark
     // surface with green accents), a header with title + count badge + pin toggle, and a

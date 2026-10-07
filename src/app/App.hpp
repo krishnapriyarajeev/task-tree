@@ -181,6 +181,30 @@ private:
     void copySelectedNode();
     TaskId copiedToastNode_ = 0;
     double copiedToastUntil_ = 0.0;
+    std::string toastText_;   // what the pill says ("Copied", "Moved to work", …)
+    void showToast(std::string text, TaskId anchor = 0);   // anchor 0 = upper-centre
+
+    // Trees (workspaces). The canvas, the DONE panel, search and the classifier outline all
+    // show only `currentTree_`; the Forest holds every tree. Which one is showing is view
+    // state, persisted in the store's meta (Session::currentTree) rather than the Forest,
+    // so undo never switches trees. Each tree remembers its own camera for the session.
+    TreeId currentTree_ = kDefaultTree;
+    struct View { Vec2 pan; float zoom = 1.f; };
+    std::unordered_map<TreeId, View> views_;
+    std::vector<TreeId> treeCands_;    // ranked trees for the '@' / '>@' commands
+    bool treeMenuOpen_ = false;        // the top-left picker's list is showing
+    TreePickerLayout picker_;          // last frame's picker geometry (for hit tests)
+    void   switchTree(TreeId tree);            // show another tree (no-op if current/unknown)
+    void   cycleTree(int delta);               // Ctrl+PgUp/PgDn: previous/next tree
+    void   createTree(const std::string& name);  // new tree + a root node, then switch
+    void   moveSelectedToTree(TreeId tree);    // the selected subtree -> tree's top level
+    void   enterMoveToTree();                  // Ctrl+Shift+M: the bar as '>@'
+    void   ensureCurrentTree();                // after undo/reload: fall back if it vanished
+    std::string treeName(TreeId tree) const;
+    TreeId activeTree() const;                 // treeCands_[candidateIdx_] (0 if none)
+    std::size_t paletteRows() const;           // rows in whichever drop-up list is open
+    void   layoutTreePicker(int winW);
+    bool   handleTreePickerClick();            // true if the click belonged to the picker
 
     // Canvas view transform (screen = pan + zoom * world). Screen-space UI is unaffected.
     Vec2  pan_;

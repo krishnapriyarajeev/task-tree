@@ -185,6 +185,9 @@ snapshots, so any mutation is reversible without per-op inverse logic (v2).
   | `?` | **find** (amber) | text | jump to the active match, stay in find |
   | `:` | **select** (blue) | `12` or text | select node 12 / the active match |
   | `>` | **parent** (green) | `12` or text | make it the parent of the selection |
+  | `>@` | **move** (green) | tree name | move the selection to that tree's top level |
+  | `@` | **tree** (violet) | tree name | switch to it (no match: create it) |
+  | `+` | **new tree** (violet) | name | create a tree seeded with a root node |
 
   In select/parent, digits mean *by id* (the node's id badge) and anything else is a text
   query; a leading `?` in the argument forces text (`:?12` looks for the text "12"), so the
@@ -214,6 +217,22 @@ snapshots, so any mutation is reversible without per-op inverse logic (v2).
   a minus when expanded, the hidden-descendant count when collapsed. Clicking it toggles
   the node's `collapsed` flag; layout then treats it as a leaf (subtree hidden, no
   overlap). View-only (no undo entry) but persisted in `tasks.json`.
+
+**Trees (workspaces)** — the store holds any number of named trees, each its own canvas
+of top-level tasks; everything that predates trees is the first one, `main`. Only the
+current tree is shown, searched, offered to the classifier and listed in the DONE panel.
+- **Picker** (top-left): a `TREE <name>` button; click it for the list (current one
+  checked) and a **+ New tree** row, which puts the bar into `+` mode to name it. A new tree
+  starts with a root node of the same name, selected.
+- **Keys**: `Ctrl+T` switch (the `@` bar, cursor already on the next tree, so `Ctrl+T`
+  `Enter` flips between neighbours), `Ctrl+Shift+T` new tree, `Ctrl+PgUp`/`Ctrl+PgDn`
+  cycle, `Ctrl+Shift+M` move the selected subtree to another tree (the `>@` bar).
+- Model: `Forest::trees` + a `tree` on **every** task (kept equal to its root's by every
+  Forest operation; `normalizeTrees()` repairs on load). Creating a tree and moving a
+  subtree are undoable. The current tree is view state in the store's `meta`
+  (`current_tree`), not in the Forest, so undo never switches trees; each tree keeps its
+  own pan/zoom for the session. `tt trees`, `tt tree-add`, `tt move`, `add --tree`,
+  `tree --tree` cover it from the CLI.
 
 **DONE panel** (right edge)
 - Autohides: reveals when the cursor is within the right ~15%, hides when it moves ~17%

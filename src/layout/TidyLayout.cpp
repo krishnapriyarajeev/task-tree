@@ -126,7 +126,9 @@ std::unordered_map<TaskId, Rect> computeLayout(const Forest& forest,
     std::vector<TaskId> roots;
     roots.reserve(forest.roots.size());
     for (TaskId r : forest.roots)
-        if (const Task* t = forest.get(r); t && !t->isDone()) roots.push_back(r);
+        if (const Task* t = forest.get(r);
+            t && !t->isDone() && (params.tree == 0 || t->tree == params.tree))
+            roots.push_back(r);
     if (roots.empty()) return out;
 
     // First walk each root (fills relX for all descendants) then pack the roots as

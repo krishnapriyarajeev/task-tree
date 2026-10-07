@@ -88,6 +88,12 @@ public:
     // as a change; polling never creates the file.
     bool changedExternally();
 
+    // The tree the overlay last showed (meta `current_tree`), so a restart reopens it.
+    // 0 when unset or for a JSON store — the caller falls back to the first tree. Pure view
+    // state: it is not part of the Forest, so undo never switches trees.
+    TreeId currentTree();
+    bool   setCurrentTree(TreeId tree);
+
 private:
     std::string path_;
     struct Impl;

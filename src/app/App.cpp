@@ -46,7 +46,10 @@ App::App(IPlatform& platform, Renderer& renderer, IClassifier& classifier,
       // `forest` is already loaded by main, so this is exactly what is on disk: the
       // correct starting baseline. Seeding it empty would make the first save look like
       // "everything is new, nothing was deleted" and leak deleted rows.
-      lastSaved_(forest) {}
+      lastSaved_(forest) {
+    currentTree_ = session_.currentTree();   // reopen the tree the overlay last showed
+    ensureCurrentTree();
+}
 
 // ---- hotkey actions --------------------------------------------------------
 
@@ -81,6 +84,7 @@ void App::hide() {
     textSelecting_ = false;
     copiedToastNode_ = 0;
     copiedToastUntil_ = 0.0;
+    treeMenuOpen_ = false;
     drag_.cancel();
     cancelPanAnim();
     clearPalette();
@@ -106,6 +110,7 @@ void App::onKey(int key, int action, int mods) {
 
     if (action == GLFW_RELEASE || mode_ == Mode::Hidden) return;
 
+    if (key == GLFW_KEY_ESCAPE && treeMenuOpen_) { treeMenuOpen_ = false; return; }
     if (key == GLFW_KEY_ESCAPE && drag_.active()) { drag_.cancel(); return; }
     if (key == GLFW_KEY_ESCAPE && editingNode_ != 0) { cancelEditing(); return; }
     // Esc backs out of a palette mode (leaving the overlay open) before it does anything
@@ -158,6 +163,22 @@ void App::onKey(int key, int action, int mods) {
             updatePalette();
             return;
         }
+        // Trees: Ctrl+T switch, Ctrl+Shift+T new, Ctrl+PgUp/PgDn cycle, Ctrl+Shift+M move the
+        // selection to another tree. Not while editing a node's text — the bar is busy.
+        if (mode_ == Mode::Full && editingNode_ == 0) {
+            const bool shift = (mods & GLFW_MOD_SHIFT) != 0;
+            if (key == GLFW_KEY_T) {
+                treeMenuOpen_ = false;
+                setPaletteMode(shift ? palette::Mode::NewTree : palette::Mode::Tree);
+                input_.setFocused(true);
+                return;
+            }
+            if (key == GLFW_KEY_PAGE_UP || key == GLFW_KEY_PAGE_DOWN) {
+                cycleTree(key == GLFW_KEY_PAGE_DOWN ? 1 : -1);
+                return;
+            }
+            if (key == GLFW_KEY_M && shift) { enterMoveToTree(); return; }
+        }
         if (key == GLFW_KEY_M) { moveOverlayToNextMonitor(); return; }          // next monitor
         if (key == GLFW_KEY_F && mode_ == Mode::Full) { enterFindMode(); return; } // find
         if (mode_ == Mode::Full && key == GLFW_KEY_Z) {   // undo / redo
@@ -169,8 +190,7 @@ void App::onKey(int key, int action, int mods) {
 
     // ↑/↓ walk whichever drop-up is open — node candidates, or the '/' mode menu. (They do
     // nothing in the single-line field otherwise, so nothing is shadowed.)
-    if ((key == GLFW_KEY_UP || key == GLFW_KEY_DOWN) &&
-        (!candidates_.empty() || !menuItems_.empty())) {
+    if ((key == GLFW_KEY_UP || key == GLFW_KEY_DOWN) && paletteRows() != 0) {
         movePaletteCursor(key == GLFW_KEY_DOWN ? 1 : -1);
         return;
     }
@@ -202,6 +222,8 @@ bool App::tryEnterMode(unsigned int codepoint) {
     // Inside select/parent, '?' means "force a text query" (':?12'), so it stays literal.
     if (c == '?' && (pmode_ == palette::Mode::Select || pmode_ == palette::Mode::Parent))
         return false;
+    // Inside parent, '@' starts a tree name ('>@work' moves the selection to that tree).
+    if (c == '@' && pmode_ == palette::Mode::Parent) return false;
 
     const palette::Mode m = palette::modeForPrefix(c);
     if (m == palette::Mode::Add) return false;
@@ -214,6 +236,13 @@ void App::setPaletteMode(palette::Mode m) {
     input_.clear();          // the prefix is the mode now; the bar holds only its argument
     candidateIdx_ = 0;
     updatePalette();
+    // The switcher opens on the tree AFTER the current one, so Ctrl+T, Enter flips between
+    // neighbours without any typing.
+    if (m == palette::Mode::Tree && treeCands_.size() > 1) {
+        const auto it = std::find(treeCands_.begin(), treeCands_.end(), currentTree_);
+        if (it != treeCands_.end())
+            candidateIdx_ = static_cast<std::size_t>(it - treeCands_.begin() + 1) % treeCands_.size();
+    }
 }
 
 void App::updatePalette() {
@@ -225,15 +254,21 @@ void App::updatePalette() {
 
     candidates_.clear();
     menuItems_.clear();
+    treeCands_.clear();
     searchHits_.clear();
     if (pmode_ == palette::Mode::Menu) {
         // The menu is a pure picker: every mode, always, in display order.
         for (const palette::ModeInfo& i : palette::modes()) menuItems_.push_back(i.mode);
+    } else if (cmd_.picksTree()) {
+        treeCands_ = palette::rankTrees(forest_, cmd_.query);
+        // Moving into the tree it is already in means nothing: leave that one out.
+        if (cmd_.kind == palette::Kind::MoveToTree)
+            std::erase(treeCands_, currentTree_);
     } else if (cmd_.picksByText() && !cmd_.query.empty()) {
-        candidates_ = palette::rankMatches(forest_, cmd_.query);
+        candidates_ = palette::rankMatches(forest_, cmd_.query, 0, currentTree_);
         searchHits_.insert(candidates_.begin(), candidates_.end());
     }
-    const std::size_t rows = candidates_.empty() ? menuItems_.size() : candidates_.size();
+    const std::size_t rows = paletteRows();
     if (candidateIdx_ >= rows) candidateIdx_ = (rows == 0) ? 0 : rows - 1;
 
     // Preview rings, reusing the canvas vocabulary: blue = what Enter will select/jump to,
@@ -263,8 +298,18 @@ void App::enterFindMode() {
     input_.setFocused(true);
 }
 
+std::size_t App::paletteRows() const {
+    if (!candidates_.empty()) return candidates_.size();
+    if (!treeCands_.empty()) return treeCands_.size();
+    return menuItems_.size();
+}
+
+TreeId App::activeTree() const {
+    return candidateIdx_ < treeCands_.size() ? treeCands_[candidateIdx_] : 0;
+}
+
 void App::movePaletteCursor(int delta) {
-    const std::size_t rows = candidates_.empty() ? menuItems_.size() : candidates_.size();
+    const std::size_t rows = paletteRows();
     if (rows == 0) return;
     const int n = static_cast<int>(rows);
     int i = static_cast<int>(candidateIdx_) + delta;
@@ -285,7 +330,8 @@ TaskId App::activeCandidate() const {
 
 TaskId App::commandTarget() const {
     if (cmd_.kind == palette::Kind::SelectId || cmd_.kind == palette::Kind::ParentId)
-        return (forest_.exists(cmd_.id) && !forest_.isInDoneSection(cmd_.id)) ? cmd_.id : 0;
+        return (forest_.exists(cmd_.id) && !forest_.isInDoneSection(cmd_.id) &&
+                forest_.treeOf(cmd_.id) == currentTree_) ? cmd_.id : 0;
     return activeCandidate();
 }
 
@@ -324,6 +370,29 @@ void App::runCommand() {
             reparentSelected(target);         // undo + anchor + flash all live in there
             clearPalette();
             return;
+        case palette::Kind::SwitchTree: {
+            const TreeId t = activeTree();
+            const std::string name = cmd_.query;
+            if (t == 0 && name.empty()) return;
+            clearPalette();
+            if (t != 0) switchTree(t);
+            else        createTree(name);     // no tree by that name: make it
+            return;
+        }
+        case palette::Kind::NewTree: {
+            const std::string name = cmd_.body;
+            if (name.empty()) return;
+            clearPalette();
+            createTree(name);
+            return;
+        }
+        case palette::Kind::MoveToTree: {
+            const TreeId t = activeTree();
+            if (selected_ == 0 || t == 0) return;
+            clearPalette();
+            moveSelectedToTree(t);
+            return;
+        }
     }
 }
 
@@ -353,6 +422,8 @@ Color App::paletteTint() const {
         case palette::Mode::Find:   return {245 / 255.f, 200 / 255.f, 70 / 255.f, 0.86f};
         case palette::Mode::Select: return {120 / 255.f, 175 / 255.f, 255 / 255.f, 1.f};
         case palette::Mode::Parent: return cfg_.dropHint;
+        case palette::Mode::Tree:
+        case palette::Mode::NewTree: return {185 / 255.f, 150 / 255.f, 255 / 255.f, 1.f};
         case palette::Mode::Menu:
         case palette::Mode::Add:    break;
     }
@@ -390,6 +461,15 @@ std::string App::paletteStatus() const {
             if (!canReparent(selected_, target)) return "can't move there";
             return "→ child of " + std::to_string(target);
         }
+        case palette::Kind::SwitchTree:
+            if (const TreeId t = activeTree()) return "→ " + treeName(t);
+            return cmd_.query.empty() ? std::string{} : "Enter creates “" + cmd_.query + "”";
+        case palette::Kind::NewTree:
+            return cmd_.body.empty() ? std::string{} : "Enter creates “" + cmd_.body + "”";
+        case palette::Kind::MoveToTree:
+            if (selected_ == 0) return "select a node first";
+            if (const TreeId t = activeTree()) return "→ move to " + treeName(t);
+            return forest_.trees.size() < 2 ? "no other tree" : "no tree matches";
         case palette::Kind::AddTask:
             break;
     }
@@ -411,6 +491,28 @@ void App::drawPaletteDropUp(const Rect& inputBox) {
         }
         renderer_.drawPalette(inputBox, rows, static_cast<int>(candidateIdx_), 0,
                               "↑↓ pick · Enter use · Esc cancel", paletteTint(), cfg_);
+        return;
+    }
+
+    // Tree pickers ('@', '>@'): one row per tree; the current one is marked.
+    if (!treeCands_.empty()) {
+        const std::size_t n = treeCands_.size();
+        std::size_t first = (candidateIdx_ > 0) ? candidateIdx_ - 1 : 0;
+        first = (n > kRows) ? std::min(first, n - kRows) : 0;
+        const std::size_t shown = std::min(kRows, n - first);
+        std::vector<std::pair<std::string, std::string>> rows;
+        for (std::size_t i = first; i < first + shown; ++i) {
+            const TreeId t = treeCands_[i];
+            const std::size_t roots = forest_.rootsOf(t).size();
+            rows.emplace_back("@", treeName(t) + (t == currentTree_ ? "  · current" : "") +
+                                       "  (" + std::to_string(roots) +
+                                       (roots == 1 ? " root)" : " roots)"));
+        }
+        const char* hint = cmd_.kind == palette::Kind::MoveToTree
+                               ? "↑↓ pick · Enter move here · Esc cancel"
+                               : "↑↓ pick · Enter switch · Esc cancel";
+        renderer_.drawPalette(inputBox, rows, static_cast<int>(candidateIdx_ - first),
+                              static_cast<int>(n - (first + shown)), hint, paletteTint(), cfg_);
         return;
     }
 
@@ -449,6 +551,10 @@ bool App::nodeOnScreen(TaskId id) const {
 
 void App::onMouseButton(int button, int action, int mods) {
     if (mode_ != Mode::Full) return;
+
+    // The top-left tree picker sits above everything else on screen.
+    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS && handleTreePickerClick())
+        return;
 
     // Input-bar text selection (task 188). A left-drag that began in the bar keeps extending
     // the selection until the button is released, wherever the release lands.
@@ -675,8 +781,11 @@ void App::commitInput() {
         // Dev fast path: TaskTree's own to-dos ("ttd> ...") park directly under the
         // "tasktree dev" node and skip LLM classification entirely.
         id = forest_.addTask(txt, ensureDevRoot(forest_, nowMs()), nowMs());
+        // The dev root lives in whichever tree it was made in: follow the task there, or
+        // the add would vanish from view.
+        if (mode_ == Mode::Full) switchTree(forest_.treeOf(id));
     } else {
-        id = forest_.addTask(txt, kNoParent, nowMs());
+        id = forest_.addTask(txt, kNoParent, nowMs(), currentTree_);
         if (classifier_.enabled()) {
             classifier_.classify(txt, buildTreeOutline(id),
                                   [this, id](ClassifyResult r) { pushClassification(id, r); });
@@ -710,8 +819,11 @@ std::string App::buildTreeOutline(TaskId exclude) const {
     // in the tree, so done subtrees are skipped here — the classifier must never be offered
     // a DONE node as a parent.
     std::string out;
+    // Only the current tree: that is where the new task was added, and a parent offered
+    // from another tree would whisk it off screen.
     std::vector<TaskId> stack;
-    for (auto it = forest_.roots.rbegin(); it != forest_.roots.rend(); ++it)
+    const std::vector<TaskId> roots = forest_.rootsOf(currentTree_);
+    for (auto it = roots.rbegin(); it != roots.rend(); ++it)
         stack.push_back(*it);
     while (!stack.empty()) {
         const TaskId id = stack.back();
@@ -803,6 +915,7 @@ void App::relayoutIfNeeded() {
     if (!needsRelayout_) return;
     renderer_.measureSizes(forest_, cfg_, sizes_);
     params_.defaultSize = {cfg_.maxNodeWidth * 0.6f, renderer_.fontSize() + 20.f};
+    params_.tree = currentTree_;
     rects_ = computeLayout(forest_, sizes_, params_);
     needsRelayout_ = false;
 }
@@ -886,6 +999,7 @@ void App::drawScene(int winW, int winH, float dpr) {
     }
 
     layoutDonePanel(winW, winH);
+    layoutTreePicker(winW);
 
     renderer_.beginFrame(winW, winH, dpr);
     if (mode_ == Mode::Full) {
@@ -906,6 +1020,7 @@ void App::drawScene(int winW, int winH, float dpr) {
                            ringSel, reparentTarget_);
         if (donePanel_.visible)
             renderer_.drawDonePanel(donePanel_, forest_, doneRows_, cfg_);
+        renderer_.drawTreePicker(picker_, cfg_);
         InputStyle style;
         style.editing = editingNode_ != 0;
         // In the '/' menu the bar isn't an editor: it just names the highlighted mode (no
@@ -917,6 +1032,7 @@ void App::drawScene(int winW, int winH, float dpr) {
             style.tinted = true;
             style.border = paletteTint();
             style.chip = info ? std::string(info->name) : std::string{};
+            if (cmd_.kind == palette::Kind::MoveToTree) style.chip = "move";
             // Every mode reserves the width of the longest label, so switching modes never
             // shifts the text after it.
             for (const palette::ModeInfo& i : palette::modes())
@@ -938,7 +1054,7 @@ void App::drawScene(int winW, int winH, float dpr) {
 
         // "Copied" pill above the node whose text was just copied (task 186). Anchored to the
         // node's screen rect; if that's off-screen, fall back to the upper-centre of the view.
-        if (glfwGetTime() < copiedToastUntil_ && copiedToastNode_ != 0) {
+        if (glfwGetTime() < copiedToastUntil_ && !toastText_.empty()) {
             const float fw = static_cast<float>(winW), fh = static_cast<float>(winH);
             float cx = fw * 0.5f, cyBottom = fh * 0.25f;
             auto it = rects_.find(copiedToastNode_);
@@ -951,7 +1067,7 @@ void App::drawScene(int winW, int winH, float dpr) {
                     cyBottom = syTop - 8.f;
                 }
             }
-            renderer_.drawToast(cx, cyBottom, "Copied", cfg_);
+            renderer_.drawToast(cx, cyBottom, toastText_, cfg_);
         }
     } else if (mode_ == Mode::QuickAdd) {
         InputStyle style;
@@ -980,14 +1096,14 @@ void App::layoutDonePanel(int winW, int winH) {
     L.contentClipTop = L.panel.y + titleH;
     L.contentClipBottom = L.panel.bottom() - 8.f;
     for (const auto& [id, t] : forest_.nodes)
-        if (t.isDone()) ++L.itemCount;
+        if (t.isDone() && t.tree == currentTree_) ++L.itemCount;
     donePanel_ = L;
 
     // Measure card heights, clamp scroll, then position (screen coords, scrolled).
     // Flatten the expanded DONE tree in display order (pre-order) with depth. The section's
     // top entries are derived from the done flags (a done task keeps its place in the tree),
     // already ordered latest-completed first.
-    const std::vector<TaskId> order = forest_.doneSectionRoots();
+    const std::vector<TaskId> order = forest_.doneSectionRoots(currentTree_);
     std::vector<std::pair<TaskId, int>> flat;
     {
         std::vector<std::pair<TaskId, int>> stack;
@@ -1124,8 +1240,150 @@ void App::copySelectedNode() {
     const Task* t = forest_.get(selected_);
     if (!t) return;
     glfwSetClipboardString(platform_.window(), t->text.c_str());
-    copiedToastNode_ = selected_;
+    showToast("Copied", selected_);
+}
+
+void App::showToast(std::string text, TaskId anchor) {
+    toastText_ = std::move(text);
+    copiedToastNode_ = anchor;
     copiedToastUntil_ = glfwGetTime() + kCopiedToastDuration;
+}
+
+// ---- trees -----------------------------------------------------------------
+
+std::string App::treeName(TreeId tree) const {
+    const Tree* t = forest_.tree(tree);
+    return t ? t->name : std::string{};
+}
+
+void App::ensureCurrentTree() {
+    if (forest_.tree(currentTree_)) return;
+    currentTree_ = forest_.trees.empty() ? kDefaultTree : forest_.trees.front().id;
+    pan_ = {0.f, 0.f};
+    zoom_ = 1.f;
+    forceRelayout();
+}
+
+void App::switchTree(TreeId tree) {
+    if (tree == currentTree_ || !forest_.tree(tree)) return;
+    views_[currentTree_] = {pan_, zoom_};
+    currentTree_ = tree;
+    const auto it = views_.find(tree);
+    pan_ = (it != views_.end()) ? it->second.pan : Vec2{0.f, 0.f};
+    zoom_ = (it != views_.end()) ? it->second.zoom : 1.f;
+    // Everything that pointed at a node on the old canvas is now meaningless.
+    cancelPanAnim();
+    drag_.cancel();
+    selected_ = 0;
+    reparentTarget_ = 0;
+    previewSelect_ = 0;
+    focusNode_ = 0;
+    anchorNode_ = 0;
+    highlightSet_.clear();
+    scrollY_ = 0.f;
+    treeMenuOpen_ = false;
+    forceRelayout();
+    session_.setCurrentTree(tree);
+    updatePalette();
+    showToast(treeName(tree));
+}
+
+void App::cycleTree(int delta) {
+    const auto& ts = forest_.trees;
+    if (ts.size() < 2) return;
+    const int n = static_cast<int>(ts.size());
+    int i = 0;
+    for (int k = 0; k < n; ++k)
+        if (ts[k].id == currentTree_) i = k;
+    switchTree(ts[((i + delta) % n + n) % n].id);
+}
+
+void App::createTree(const std::string& name) {
+    if (name.empty()) return;
+    history_.snapshot(forest_);   // one undo removes both the tree and its root
+    const TreeId tree = forest_.addTree(name);
+    const TaskId root = forest_.addTask(name, kNoParent, nowMs(), tree);
+    save();
+    switchTree(tree);
+    selected_ = root;             // ready for Ctrl+click / '>' to hang things off it
+    flashPath(root);
+    focusNode_ = root;
+}
+
+void App::moveSelectedToTree(TreeId tree) {
+    const TaskId id = selected_;
+    if (!forest_.exists(id) || !forest_.tree(tree)) return;
+    if (drag_.active()) drag_.cancel();
+    Forest before = forest_;
+    if (!forest_.moveToTree(id, tree)) return;
+    history_.record(std::move(before));
+    selected_ = 0;
+    reparentTarget_ = 0;
+    forceRelayout();
+    save();
+    updatePalette();
+    showToast("Moved to " + treeName(tree));
+}
+
+void App::enterMoveToTree() {
+    treeMenuOpen_ = false;
+    setPaletteMode(palette::Mode::Parent);
+    input_.setText("@");   // '>@': the parent is a tree
+    input_.setFocused(true);
+    updatePalette();
+}
+
+void App::layoutTreePicker(int winW) {
+    TreePickerLayout L;
+    const float m = 12.f, rowH = renderer_.treePickerRowHeight();
+    const float hintScale = 0.72f;
+    L.current = treeName(currentTree_);
+    const float maxW = std::max(200.f, winW * 0.3f);
+    const float labelW = renderer_.measureTextWidth("TREE") * hintScale;
+    const float bw = std::clamp(labelW + renderer_.measureTextWidth(L.current) + 72.f, 170.f, maxW);
+    L.button = {m, m, bw, rowH + 6.f};
+    L.buttonHovered = L.button.contains(mouse_.x, mouse_.y);
+    L.open = treeMenuOpen_ && mode_ == Mode::Full;
+    if (L.open) {
+        L.hint = "Ctrl+T switch · Ctrl+Shift+T new · Ctrl+PgUp/Dn cycle";
+        float cw = std::max(bw, renderer_.measureTextWidth(L.hint) * hintScale + 32.f);
+        for (const Tree& t : forest_.trees) {
+            L.names.push_back(t.name);
+            cw = std::max(cw, renderer_.measureTextWidth(t.name) + 60.f);
+        }
+        cw = std::min(cw, maxW);
+        const float pad = 6.f, footerH = renderer_.fontSize() * hintScale + 16.f;
+        const std::size_t n = forest_.trees.size() + 1;   // + "New tree"
+        L.card = {m, L.button.bottom() + 8.f, cw, 2 * pad + n * rowH + footerH};
+        for (std::size_t i = 0; i < n; ++i) {
+            const Rect r{L.card.x + 4.f, L.card.y + pad + i * rowH, cw - 8.f, rowH};
+            if (i + 1 < n && forest_.trees[i].id == currentTree_) L.currentRow = static_cast<int>(i);
+            if (r.contains(mouse_.x, mouse_.y)) L.hoveredRow = static_cast<int>(i);
+            L.rows.push_back(r);
+        }
+    }
+    picker_ = std::move(L);
+}
+
+bool App::handleTreePickerClick() {
+    if (picker_.button.contains(mouse_.x, mouse_.y)) {
+        treeMenuOpen_ = !treeMenuOpen_;
+        return true;
+    }
+    if (!treeMenuOpen_) return false;
+    treeMenuOpen_ = false;   // any click closes it; one outside is swallowed, not acted on
+    for (std::size_t i = 0; i < picker_.rows.size(); ++i) {
+        if (!picker_.rows[i].contains(mouse_.x, mouse_.y)) continue;
+        if (i + 1 == picker_.rows.size()) {   // "+ New tree": name it in the bar
+            if (editingNode_ != 0) cancelEditing();
+            setPaletteMode(palette::Mode::NewTree);
+            input_.setFocused(true);
+        } else if (i < forest_.trees.size()) {
+            switchTree(forest_.trees[i].id);
+        }
+        break;
+    }
+    return true;
 }
 
 double App::desiredTimeout() const {
@@ -1183,6 +1441,7 @@ void App::reloadFromStore() {
     reparentTarget_ = 0;
     highlightSet_.clear();   // the flash path was computed against the old tree
     if (!forest_.exists(selected_)) selected_ = 0;
+    ensureCurrentTree();
     std::erase_if(doneExpanded_, [this](TaskId id) { return !forest_.exists(id); });
     forceRelayout();
     updatePalette();   // candidates/previews may reference vanished or renamed nodes
@@ -1298,6 +1557,7 @@ void App::deleteSelected() {
 }
 
 void App::afterHistoryChange() {
+    ensureCurrentTree();   // undoing a tree's creation removes the tree being shown
     drag_.cancel();
     focusNode_ = 0;
     reparentTarget_ = 0;
