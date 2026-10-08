@@ -24,7 +24,7 @@ struct LayoutParams {
     // (roots end up at top-centre). Falls back to leftMargin if the tree is wider.
     float centerWidth = 0.f;
     Size  defaultSize{160.f, 44.f}; // used when a node has no measured size
-    TreeId tree = 0;         // lay out only this tree's top-level tasks (0 = every tree)
+    TaskId root = 0;         // lay out only this node's subtree (a workspace); 0 = the forest
 };
 
 // Returns a map from task id to its laid-out Rect (top-left based, logical units).

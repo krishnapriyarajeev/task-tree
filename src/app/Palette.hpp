@@ -11,10 +11,9 @@
 //                      (typing a mode's symbol jumps straight there)
 //   ?         Find     highlight matches, walk them, jump to one
 //   :         Select   select a node: "12" by id, anything else by text
-//   >         Parent   make a node the parent of the selection (same two ways);
-//                      '>@name' instead moves the selection to another tree's top level
-//   @         Tree     switch to a tree by name (no match: Enter creates it)
-//   +         NewTree  create a tree, seeded with a root node of the same name
+//   >         Parent   make a node the parent of the selection (same two ways)
+//   @         Workspace     go to a workspace by name (no match: Enter creates it)
+//   +         NewWorkspace  create a workspace here: a new node, marked, entered
 //
 // In Select/Parent a leading '?' in the argument forces a text query, so the ':?12' /
 // '>?query' spellings work exactly as typed. To add a task that starts with a prefix
@@ -33,17 +32,17 @@
 namespace tt::palette {
 
 // What the bar is doing. Drives the chip label, the accent colour and the drop-up.
-enum class Mode { Add, Menu, Find, Select, Parent, Tree, NewTree };
+enum class Mode { Add, Menu, Find, Select, Parent, Workspace, NewWorkspace };
 
 // The resolved action for the current (mode, argument) pair.
 enum class Kind { AddTask, Find, SelectId, SelectText, ParentId, ParentText,
-                  SwitchTree, NewTree, MoveToTree };
+                  GoWorkspace, NewWorkspace };
 
 struct Command {
     Kind kind = Kind::AddTask;
     TaskId id = 0;         // SelectId / ParentId — 0 when none was given
     std::string query;     // Find / SelectText / ParentText, trimmed
-    std::string body;      // AddTask / NewTree — the text, trimmed
+    std::string body;      // AddTask / NewWorkspace — the text, trimmed
 
     bool isCommand() const { return kind != Kind::AddTask; }
     // Modes whose target comes from the ranked match list (↑/↓ and the drop-up apply).
@@ -52,8 +51,8 @@ struct Command {
     }
     bool selects() const { return kind == Kind::SelectId || kind == Kind::SelectText; }
     bool reparents() const { return kind == Kind::ParentId || kind == Kind::ParentText; }
-    // Modes whose target is a tree, picked from rankTrees (↑/↓ and the drop-up apply).
-    bool picksTree() const { return kind == Kind::SwitchTree || kind == Kind::MoveToTree; }
+    // The workspace switcher, picked from rankWorkspaces (↑/↓ and the drop-up apply).
+    bool picksWorkspace() const { return kind == Kind::GoWorkspace; }
 };
 
 // One row of the '/' menu, and the source of every mode's chip label + accent.
@@ -76,12 +75,13 @@ Command interpret(Mode mode, const std::string& arg);
 // Case-insensitive substring matches over canvas nodes (the DONE section is excluded —
 // it isn't on the canvas), best first: earliest match position, then shorter text (a
 // tighter match), then smaller id so the order is stable across runs. `limit` 0 = all.
-// `tree` restricts the search to one tree's canvas; 0 searches every tree.
+// `scope` restricts the search to that node's subtree (the workspace being shown);
+// kMainView searches everything.
 std::vector<TaskId> rankMatches(const Forest& f, const std::string& query,
-                                std::size_t limit = 0, TreeId tree = 0);
+                                std::size_t limit = 0, TaskId scope = kMainView);
 
-// Trees whose name contains `query` (case-insensitive), ranked like rankMatches, ties in
-// list order. An empty query lists every tree in display order — the switcher's default.
-std::vector<TreeId> rankTrees(const Forest& f, const std::string& query);
+// Workspaces whose text contains `query` (case-insensitive), ranked like rankMatches, ties
+// in Forest::workspaces() order — which an empty query returns as is.
+std::vector<TaskId> rankWorkspaces(const Forest& f, const std::string& query);
 
 } // namespace tt::palette

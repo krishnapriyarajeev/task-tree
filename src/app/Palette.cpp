@@ -44,11 +44,11 @@ const std::vector<ModeInfo>& modes() {
         {Mode::Select, ':', "select", "select a node — its id, or text to match",
          "node id, or text to match…"},
         {Mode::Parent, '>', "parent", "make a node the parent of the selected one",
-         "node id, text to match, or @tree…"},
-        {Mode::Tree, '@', "tree", "switch to another tree (a new name creates it)",
-         "tree name…"},
-        {Mode::NewTree, '+', "new tree", "create a tree with a root node",
-         "name of the new tree…"},
+         "node id, or text to match…"},
+        {Mode::Workspace, '@', "workspace", "go to a workspace (a new name creates one)",
+         "workspace name…"},
+        {Mode::NewWorkspace, '+', "new workspace", "create a workspace inside this view",
+         "name of the new workspace…"},
     };
     return kModes;
 }
@@ -80,24 +80,17 @@ Command interpret(Mode mode, const std::string& arg) {
             c.kind = Kind::Find;
             c.query = trim(arg);
             return c;
-        case Mode::Tree:
-            c.kind = Kind::SwitchTree;
+        case Mode::Workspace:
+            c.kind = Kind::GoWorkspace;
             c.query = trim(arg);
             return c;
-        case Mode::NewTree:
-            c.kind = Kind::NewTree;
+        case Mode::NewWorkspace:
+            c.kind = Kind::NewWorkspace;
             c.body = trim(arg);
             return c;
         case Mode::Select:
         case Mode::Parent:
             break;
-    }
-
-    // '>@name': the destination is a tree, not a node.
-    if (mode == Mode::Parent && !arg.empty() && arg[0] == '@') {
-        c.kind = Kind::MoveToTree;
-        c.query = trim(arg.substr(1));
-        return c;
     }
 
     // Select / Parent: digits mean "by id", anything else is a text query. A leading '?'
@@ -116,7 +109,7 @@ Command interpret(Mode mode, const std::string& arg) {
 }
 
 std::vector<TaskId> rankMatches(const Forest& f, const std::string& query, std::size_t limit,
-                                TreeId tree) {
+                                TaskId scope) {
     std::vector<TaskId> out;
     const std::string q = lower(trim(query));
     if (q.empty()) return out;
@@ -129,7 +122,7 @@ std::vector<TaskId> rankMatches(const Forest& f, const std::string& query, std::
     std::vector<Hit> hits;
     for (const auto& [id, t] : f.nodes) {
         if (f.isInDoneSection(id)) continue;
-        if (tree != 0 && t.tree != tree) continue;
+        if (scope != kMainView && !f.isDescendantOf(id, scope)) continue;
         const std::string lt = lower(t.text);
         const std::size_t pos = lt.find(q);
         if (pos == std::string::npos) continue;
@@ -147,16 +140,17 @@ std::vector<TaskId> rankMatches(const Forest& f, const std::string& query, std::
     return out;
 }
 
-std::vector<TreeId> rankTrees(const Forest& f, const std::string& query) {
-    std::vector<TreeId> out;
+std::vector<TaskId> rankWorkspaces(const Forest& f, const std::string& query) {
+    std::vector<TaskId> out;
     const std::string q = lower(trim(query));
-    struct Hit { std::size_t pos, len, order; TreeId id; };
+    struct Hit { std::size_t pos, len, order; TaskId id; };
     std::vector<Hit> hits;
-    for (std::size_t i = 0; i < f.trees.size(); ++i) {
-        const std::string ln = lower(f.trees[i].name);
+    const std::vector<TaskId> all = f.workspaces();
+    for (std::size_t i = 0; i < all.size(); ++i) {
+        const std::string ln = lower(f.get(all[i])->text);
         const std::size_t pos = q.empty() ? 0 : ln.find(q);
         if (pos == std::string::npos) continue;
-        hits.push_back({pos, q.empty() ? 0 : ln.size(), i, f.trees[i].id});
+        hits.push_back({pos, q.empty() ? 0 : ln.size(), i, all[i]});
     }
     std::stable_sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) {
         if (a.pos != b.pos) return a.pos < b.pos;

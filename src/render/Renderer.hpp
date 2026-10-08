@@ -53,16 +53,17 @@ struct DonePanelLayout {
     int   itemCount = 0;      // total completed tasks (shown as a count badge)
 };
 
-// The tree (workspace) picker in the top-left corner, laid out by App (screen coords). The
-// button names the current tree; when open, a card below it lists every tree (the current
-// one checked) and ends with a "+ New tree" row.
-struct TreePickerLayout {
+// The workspace picker in the top-left corner, laid out by App (screen coords). The button
+// shows where you are as a breadcrumb ("main › work › amqp"); when open, a card below it
+// lists main + every workspace (the current one checked) and ends with "+ New workspace".
+struct ViewPickerLayout {
     Rect button;
-    std::string current;               // name on the button
+    std::string current;               // breadcrumb on the button
     bool open = false;
     Rect card;                         // the open list's background
-    std::vector<Rect> rows;            // one per tree, then the "+ New tree" row last
-    std::vector<std::string> names;    // tree names, parallel to rows (minus the last)
+    std::vector<Rect> rows;            // main, each workspace, then "+ New workspace" last
+    std::vector<std::string> names;    // row labels, parallel to rows (minus the last)
+    std::vector<int> depths;           // workspace nesting depth per row (indent)
     int currentRow = -1;               // the checked row
     int hoveredRow = -1;               // row under the cursor (-1 = none)
     bool buttonHovered = false;
@@ -103,7 +104,8 @@ public:
                   const Config& cfg, const DragVisual& dv, Vec2 pan, float zoom,
                   const std::unordered_set<TaskId>& pathHi, float pathStrength,
                   const std::unordered_set<TaskId>& searchHits, TaskId selected = 0,
-                  TaskId reparentTarget = 0);
+                  TaskId reparentTarget = 0,
+                  const std::unordered_map<TaskId, float>* fade = nullptr);
 
     // The input widget. In quick-add mode it's a centred box with a drop shadow; otherwise
     // a bar at the bottom of the overlay. `[selBegin, selEnd)` is highlighted as the current
@@ -133,10 +135,10 @@ public:
                      int moreCount, const std::string& hint, const Color& tint,
                      const Config& cfg);
 
-    // The tree picker (see TreePickerLayout): button always, list card when open.
-    void drawTreePicker(const TreePickerLayout& layout, const Config& cfg);
+    // The workspace picker (see ViewPickerLayout): button always, list card when open.
+    void drawViewPicker(const ViewPickerLayout& layout, const Config& cfg);
     // Height of the picker's rows / button, so App can lay it out before drawing.
-    float treePickerRowHeight() const { return fontSize_ + 14.f; }
+    float viewPickerRowHeight() const { return fontSize_ + 14.f; }
 
     // The DONE side panel: a floating rounded card (drop shadow + subtle border, dark
     // surface with green accents), a header with title + count badge + pin toggle, and a
@@ -155,8 +157,9 @@ public:
 private:
     void drawNode(const Rect& r, const std::string& text, const Config& cfg,
                   bool highlight, float alphaMul, TaskId id, int status,
-                  const std::string& dateChip) const;
-    void drawEdge(const Rect& parent, const Rect& child, const Config& cfg) const;
+                  const std::string& dateChip, bool workspace = false) const;
+    void drawEdge(const Rect& parent, const Rect& child, const Config& cfg,
+                  float alphaMul = 1.f) const;
 
     // Collapse/expand handle on a node with children: a small disc on the bottom edge.
     // Collapsed -> shows the hidden-descendant count; expanded -> a minus sign.

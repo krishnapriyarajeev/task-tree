@@ -185,9 +185,8 @@ snapshots, so any mutation is reversible without per-op inverse logic (v2).
   | `?` | **find** (amber) | text | jump to the active match, stay in find |
   | `:` | **select** (blue) | `12` or text | select node 12 / the active match |
   | `>` | **parent** (green) | `12` or text | make it the parent of the selection |
-  | `>@` | **move** (green) | tree name | move the selection to that tree's top level |
-  | `@` | **tree** (violet) | tree name | switch to it (no match: create it) |
-  | `+` | **new tree** (violet) | name | create a tree seeded with a root node |
+  | `@` | **workspace** (violet) | name | go to it (no match: create it) |
+  | `+` | **new workspace** (violet) | name | new marked node in this view, entered |
 
   In select/parent, digits mean *by id* (the node's id badge) and anything else is a text
   query; a leading `?` in the argument forces text (`:?12` looks for the text "12"), so the
@@ -218,21 +217,26 @@ snapshots, so any mutation is reversible without per-op inverse logic (v2).
   the node's `collapsed` flag; layout then treats it as a leaf (subtree hidden, no
   overlap). View-only (no undo entry) but persisted in `tasks.json`.
 
-**Trees (workspaces)** — the store holds any number of named trees, each its own canvas
-of top-level tasks; everything that predates trees is the first one, `main`. Only the
-current tree is shown, searched, offered to the classifier and listed in the DONE panel.
-- **Picker** (top-left): a `TREE <name>` button; click it for the list (current one
-  checked) and a **+ New tree** row, which puts the bar into `+` mode to name it. A new tree
-  starts with a root node of the same name, selected.
-- **Keys**: `Ctrl+T` switch (the `@` bar, cursor already on the next tree, so `Ctrl+T`
-  `Enter` flips between neighbours), `Ctrl+Shift+T` new tree, `Ctrl+PgUp`/`Ctrl+PgDn`
-  cycle, `Ctrl+Shift+M` move the selected subtree to another tree (the `>@` bar).
-- Model: `Forest::trees` + a `tree` on **every** task (kept equal to its root's by every
-  Forest operation; `normalizeTrees()` repairs on load). Creating a tree and moving a
-  subtree are undoable. The current tree is view state in the store's `meta`
-  (`current_tree`), not in the Forest, so undo never switches trees; each tree keeps its
-  own pan/zoom for the session. `tt trees`, `tt tree-add`, `tt move`, `add --tree`,
-  `tree --tree` cover it from the CLI.
+**Workspaces** — any task can be marked a workspace; entering one shows only its subtree
+(the workspace's node at the top), and the canvas, DONE panel, find/select, new tasks and
+the classifier outline all scope to it. Nothing moves: `main` always shows the whole forest.
+- **Keys**: `Ctrl+T` marks/unmarks the selected node (undoable; a marked node draws as a
+  stack of two cards), `Ctrl+Down` enters the selection's workspace (itself, or the closest
+  marked ancestor below the current view), `Ctrl+Up` goes up one level (the enclosing
+  workspace, or main) and selects the workspace you came out of. `@name` jumps anywhere
+  (no match creates one), `+name` creates a workspace node inside the current view.
+- **Picker** (top-left): a breadcrumb button (`main › work › amqp`); the list shows main
+  and every workspace, nested under its parent, plus **+ New workspace**.
+- **Transition**: on a view change, nodes in both layouts glide (screen-space lerp, ease-out
+  cubic, ~0.3 s) to where they land; nodes leaving fade out, arriving ones fade in.
+- Model: `Task::workspaceAt` (timestamp = flag, like `doneAt`); `Forest::workspaces()`,
+  `nearestWorkspace(from, stopAt)`, scoped `doneSectionRoots(scope)`; layout takes
+  `LayoutParams::root`. The current view is view state in the store's `meta`
+  (`current_view`), not in the Forest, so undo never moves you; each view keeps its own
+  camera for the session and recentres if none of its nodes would be on screen. A view whose
+  node is deleted, done or unmarked is left for the nearest enclosing one. Schema v5
+  replaced the short-lived v4 `trees` partition (each tree folded into a workspace task).
+  CLI: `tt workspaces`, `tt workspace <node>` (toggle), `[workspace]` in outlines.
 
 **DONE panel** (right edge)
 - Autohides: reveals when the cursor is within the right ~15%, hides when it moves ~17%

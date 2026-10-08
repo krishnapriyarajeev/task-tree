@@ -104,7 +104,8 @@ void Renderer::drawScrim(float w, float h, const Config& cfg) {
     nvgFill(vg_);
 }
 
-void Renderer::drawEdge(const Rect& parent, const Rect& child, const Config& cfg) const {
+void Renderer::drawEdge(const Rect& parent, const Rect& child, const Config& cfg,
+                        float alphaMul) const {
     const float x0 = parent.cx(), y0 = parent.bottom();
     const float x1 = child.cx(), y1 = child.top();
     nvgBeginPath(vg_);
@@ -115,19 +116,32 @@ void Renderer::drawEdge(const Rect& parent, const Rect& child, const Config& cfg
         const float k = (y1 - y0) * 0.4f;
         nvgBezierTo(vg_, x0, y0 + k, x1, y1 - k, x1, y1);
     }
-    nvgStrokeColor(vg_, col(cfg.edgeColor));
+    nvgStrokeColor(vg_, col(cfg.edgeColor, alphaMul));
     nvgStrokeWidth(vg_, 1.8f);
     nvgStroke(vg_);
 }
 
 void Renderer::drawNode(const Rect& r, const std::string& text, const Config& cfg,
                         bool highlight, float alphaMul, TaskId id, int status,
-                        const std::string& dateChip) const {
+                        const std::string& dateChip, bool workspace) const {
     // Fill + text colour depend on the status (right-click cycles it).
     const Color fillC = (status == 1) ? cfg.nodeFillInProgress
                       : (status == 2) ? cfg.nodeFillPriority
                                       : cfg.nodeFill;
     const Color textC = (status == 0) ? cfg.nodeText : cfg.nodeTextDark;
+
+    // A workspace reads as a stack of cards: a second card peeking out behind it, offset
+    // down-right — "there is a place in here you can enter" (Ctrl+Down).
+    if (workspace) {
+        const float o = 5.f;
+        nvgBeginPath(vg_);
+        nvgRoundedRect(vg_, r.x + o, r.y + o, r.w, r.h, cfg.cornerRadius);
+        nvgFillColor(vg_, col(cfg.nodeFill, alphaMul));
+        nvgFill(vg_);
+        nvgStrokeColor(vg_, nvgRGBAf(185 / 255.f, 150 / 255.f, 1.f, 0.9f * alphaMul));
+        nvgStrokeWidth(vg_, cfg.borderWidth);
+        nvgStroke(vg_);
+    }
 
     nvgBeginPath(vg_);
     nvgRoundedRect(vg_, r.x, r.y, r.w, r.h, cfg.cornerRadius);
@@ -227,13 +241,19 @@ void Renderer::drawTree(const Forest& f, const std::unordered_map<TaskId, Rect>&
                         const Config& cfg, const DragVisual& dv, Vec2 pan, float zoom,
                         const std::unordered_set<TaskId>& pathHi, float pathStrength,
                         const std::unordered_set<TaskId>& searchHits, TaskId selected,
-                        TaskId reparentTarget) {
+                        TaskId reparentTarget, const std::unordered_map<TaskId, float>* fade) {
     nvgSave(vg_);
     nvgTranslate(vg_, pan.x, pan.y);  // screen = pan + zoom * world
     nvgScale(vg_, zoom, zoom);
     auto rectOf = [&](TaskId id) -> const Rect* {
         auto it = rects.find(id);
         return it == rects.end() ? nullptr : &it->second;
+    };
+    // Per-node opacity during a workspace transition (absent = fully opaque).
+    auto alphaOf = [&](TaskId id) -> float {
+        if (!fade) return 1.f;
+        auto it = fade->find(id);
+        return it == fade->end() ? 1.f : it->second;
     };
 
     // Edges (skip any touching the dragged node — it's shown as a ghost instead).
@@ -243,7 +263,7 @@ void Renderer::drawTree(const Forest& f, const std::unordered_map<TaskId, Rect>&
         if (!pr) continue;
         for (TaskId c : t.children) {
             if (dv.active && c == dv.dragged) continue;
-            if (const Rect* cr = rectOf(c)) drawEdge(*pr, *cr, cfg);
+            if (const Rect* cr = rectOf(c)) drawEdge(*pr, *cr, cfg, std::min(alphaOf(id), alphaOf(c)));
         }
     }
 
@@ -267,9 +287,12 @@ void Renderer::drawTree(const Forest& f, const std::unordered_map<TaskId, Rect>&
         if (dv.active && id == dv.dragged) continue;
         if (const Rect* r = rectOf(id)) {
             const bool hi = dv.active && dv.validTarget && id == dv.target;
-            drawNode(*r, t.text, cfg, hi, 1.f, id, t.status, shortDate(t.createdAt, nowMs));
+            const float a = alphaOf(id);
+            if (a <= 0.01f) continue;
+            drawNode(*r, t.text, cfg, hi, a, id, t.status, shortDate(t.createdAt, nowMs),
+                     t.isWorkspace());
             // A node with children gets a collapse/expand handle on its bottom edge.
-            if (!t.children.empty())
+            if (!t.children.empty() && a >= 0.99f)
                 drawCollapseHandle(*r, t.collapsed, t.collapsed ? countDescendants(f, id) : 0, cfg);
         }
     }
@@ -278,7 +301,8 @@ void Renderer::drawTree(const Forest& f, const std::unordered_map<TaskId, Rect>&
     if (dv.active) {
         const Task* t = f.get(dv.dragged);
         drawNode(dv.ghost, t ? t->text : std::string{}, cfg, false, 0.85f, dv.dragged,
-                 t ? t->status : 0, t ? shortDate(t->createdAt, nowMs) : std::string{});
+                 t ? t->status : 0, t ? shortDate(t->createdAt, nowMs) : std::string{},
+                 t && t->isWorkspace());
     }
 
     // Fading path flash (root -> new node): highlight the path edges and node outlines.
@@ -704,7 +728,7 @@ void Renderer::drawPalette(const Rect& inputBox,
     nvgFontSize(vg_, fontSize_);   // leave the shared context as we found it
 }
 
-void Renderer::drawTreePicker(const TreePickerLayout& L, const Config& cfg) {
+void Renderer::drawViewPicker(const ViewPickerLayout& L, const Config& cfg) {
     nvgFontFaceId(vg_, font_);
     nvgFontSize(vg_, fontSize_);
     nvgTextAlign(vg_, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
@@ -728,12 +752,7 @@ void Renderer::drawTreePicker(const TreePickerLayout& L, const Config& cfg) {
     Color border = cfg.nodeBorder;
     if (!L.open && !L.buttonHovered) border.a *= 0.45f;   // quiet until you reach for it
     drawFieldChrome(b.x, b.y, b.w, b.h, cfg, border);
-    nvgFillColor(vg_, col(cfg.nodeText, 0.55f));
-    nvgFontSize(vg_, fontSize_ * 0.72f);
-    nvgText(vg_, b.x + padX_, b.y + b.h * 0.5f, "TREE", nullptr);
-    const float labelW = nvgTextBounds(vg_, 0, 0, "TREE", nullptr, nullptr);
-    nvgFontSize(vg_, fontSize_);
-    const float nameX = b.x + padX_ + labelW + 10.f;
+    const float nameX = b.x + padX_;
     const std::string name = fitText(L.current, b.right() - 30.f - nameX);
     nvgFillColor(vg_, col(cfg.nodeText));
     nvgText(vg_, nameX, b.y + b.h * 0.5f, name.c_str(), end(name));
@@ -764,7 +783,7 @@ void Renderer::drawTreePicker(const TreePickerLayout& L, const Config& cfg) {
         const float ty = r.y + r.h * 0.5f;
         if (isNew) {
             nvgFillColor(vg_, col(cfg.dropHint, hov ? 1.f : 0.8f));
-            nvgText(vg_, r.x + 10.f, ty, "+  New tree", nullptr);
+            nvgText(vg_, r.x + 10.f, ty, "+  New workspace", nullptr);
             continue;
         }
         if (static_cast<int>(i) == L.currentRow) {   // check mark on the current tree
@@ -778,10 +797,11 @@ void Renderer::drawTreePicker(const TreePickerLayout& L, const Config& cfg) {
             nvgLineJoin(vg_, NVG_ROUND);
             nvgStroke(vg_);
         }
+        const float indent = 16.f * (i < L.depths.size() ? L.depths[i] : 0);
         const std::string n = fitText(i < L.names.size() ? L.names[i] : std::string{},
-                                      r.w - 40.f);
+                                      r.w - 40.f - indent);
         nvgFillColor(vg_, col(cfg.nodeText, (hov || static_cast<int>(i) == L.currentRow) ? 1.f : 0.7f));
-        nvgText(vg_, r.x + 30.f, ty, n.c_str(), end(n));
+        nvgText(vg_, r.x + 30.f + indent, ty, n.c_str(), end(n));
     }
     if (!L.hint.empty()) {
         nvgFontSize(vg_, fontSize_ * 0.72f);

@@ -88,11 +88,11 @@ public:
     // as a change; polling never creates the file.
     bool changedExternally();
 
-    // The tree the overlay last showed (meta `current_tree`), so a restart reopens it.
-    // 0 when unset or for a JSON store — the caller falls back to the first tree. Pure view
-    // state: it is not part of the Forest, so undo never switches trees.
-    TreeId currentTree();
-    bool   setCurrentTree(TreeId tree);
+    // The view the overlay last showed (meta `current_view`: a workspace task's id, or
+    // kMainView), so a restart reopens it. kMainView when unset or for a JSON store. Pure
+    // view state: not part of the Forest, so undo never moves you between workspaces.
+    TaskId currentView();
+    bool   setCurrentView(TaskId view);
 
 private:
     std::string path_;

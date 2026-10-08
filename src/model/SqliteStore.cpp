@@ -2,9 +2,9 @@
 //
 // Schema (one row per task; `roots` / `doneRoots` / `children` are NOT stored as lists):
 //
-//   tasks(id, parent, ord, text, collapsed, status, created_at, done_at, deleted_at, tree)
-//   trees(id, name, ord, deleted_at) -- workspaces; every task's `tree` equals its root's
-//   meta(key, value)          -- next_id, current_tree
+//   tasks(id, parent, ord, text, collapsed, status, created_at, done_at, deleted_at,
+//         workspace_at)
+//   meta(key, value)          -- next_id, current_view
 //
 // TWO TIMESTAMPS, NO BOOLEANS. `done_at` and `deleted_at` each carry both the state and
 // its date, so the pair can never disagree the way a flag beside a timestamp can:
@@ -52,8 +52,9 @@ namespace {
 
 namespace fs = std::filesystem;
 
-// 1 = original, 2 = + deleted_at, 3 = `done` boolean folded into done_at, 4 = + trees
-constexpr int kSchemaVersion = 4;
+// 1 = original, 2 = + deleted_at, 3 = `done` boolean folded into done_at, 4 = + trees,
+// 5 = trees replaced by workspace_at (a workspace is a marked task, not a partition)
+constexpr int kSchemaVersion = 5;
 
 const char* const kSchema =
     "CREATE TABLE IF NOT EXISTS tasks("
@@ -66,16 +67,8 @@ const char* const kSchema =
     "  created_at INTEGER NOT NULL DEFAULT 0,"
     "  done_at    INTEGER NOT NULL DEFAULT 0,"    // 0 = not done; -1 = done, date unknown
     "  deleted_at INTEGER NOT NULL DEFAULT 0,"    // 0 = live; epoch ms = when it was deleted
-    "  tree       INTEGER NOT NULL DEFAULT 1);"   // the workspace (trees.id) it belongs to
+    "  workspace_at INTEGER NOT NULL DEFAULT 0);"  // 0 = plain task; epoch ms = made a workspace
     "CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent, ord);"
-    "CREATE TABLE IF NOT EXISTS trees("
-    "  id   INTEGER PRIMARY KEY,"
-    "  name TEXT    NOT NULL DEFAULT '',"
-    "  ord  INTEGER NOT NULL DEFAULT 0,"
-    "  deleted_at INTEGER NOT NULL DEFAULT 0);"   // soft, like tasks (only undo retires one)
-    // The default tree exists in every store, as it does in every Forest: an incremental
-    // save never writes a tree its baseline already had, so it must not depend on one.
-    "INSERT OR IGNORE INTO trees(id,name,ord) VALUES(1,'main',0);"
     "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value NOT NULL);";
 
 std::int64_t nowMs() {
@@ -112,14 +105,108 @@ int userVersion(const Db& db) {
     return sqlite3_column_int(q.h, 0);
 }
 
+// Schema 4 partitioned tasks into `trees`; 5 makes a workspace a marked task inside the one
+// forest instead. Each tree other than main (id 1) becomes a workspace task: its sole
+// top-level task if it has exactly one, else a new task named after the tree with its
+// top-level tasks moved under it. The column to mark them does not exist yet at this point,
+// so the chosen ids are parked in a temp table for applyPendingWorkspaces().
+bool foldTreesIntoWorkspaces(const Db& db) {
+    if (!db.exec("CREATE TEMP TABLE IF NOT EXISTS pending_ws(id INTEGER PRIMARY KEY)"))
+        return false;
+    std::vector<std::pair<std::int64_t, std::string>> trees;
+    {
+        Stmt q;
+        if (!q.prepare(db.h, "SELECT id,name FROM trees WHERE id!=1 AND deleted_at=0 ORDER BY ord, id"))
+            return false;
+        while (sqlite3_step(q.h) == SQLITE_ROW) {
+            const unsigned char* n = sqlite3_column_text(q.h, 1);
+            trees.emplace_back(sqlite3_column_int64(q.h, 0), n ? reinterpret_cast<const char*>(n) : "");
+        }
+    }
+    const std::int64_t now = nowMs();
+    for (const auto& [tree, name] : trees) {
+        std::vector<std::int64_t> roots;
+        {
+            Stmt q;
+            if (!q.prepare(db.h, "SELECT id FROM tasks WHERE parent=0 AND tree=? AND deleted_at=0"
+                                 " ORDER BY ord, id"))
+                return false;
+            sqlite3_bind_int64(q.h, 1, tree);
+            while (sqlite3_step(q.h) == SQLITE_ROW) roots.push_back(sqlite3_column_int64(q.h, 0));
+        }
+        if (roots.empty()) continue;   // an empty tree has nothing to keep
+        std::int64_t ws = roots.front();
+        if (roots.size() > 1) {
+            // A fresh id past both next_id and every row (deleted ones included).
+            std::int64_t id = 1;
+            Stmt q;
+            if (!q.prepare(db.h, "SELECT MAX(COALESCE((SELECT CAST(value AS INTEGER) FROM meta"
+                                 " WHERE key='next_id'),1),(SELECT COALESCE(MAX(id),0)+1 FROM tasks))") ||
+                sqlite3_step(q.h) != SQLITE_ROW)
+                return false;
+            id = sqlite3_column_int64(q.h, 0);
+            Stmt ins;
+            if (!ins.prepare(db.h, "INSERT INTO tasks(id,parent,ord,text,created_at,tree) VALUES"
+                                   "(?,0,(SELECT COALESCE(MAX(ord),0)+1 FROM tasks WHERE parent=0),?,?,1)"))
+                return false;
+            sqlite3_bind_int64(ins.h, 1, id);
+            sqlite3_bind_text(ins.h, 2, name.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(ins.h, 3, now);
+            if (sqlite3_step(ins.h) != SQLITE_DONE) return false;
+            for (std::size_t i = 0; i < roots.size(); ++i) {
+                Stmt mv;
+                if (!mv.prepare(db.h, "UPDATE tasks SET parent=?, ord=? WHERE id=?")) return false;
+                sqlite3_bind_int64(mv.h, 1, id);
+                sqlite3_bind_int(mv.h, 2, static_cast<int>(i));
+                sqlite3_bind_int64(mv.h, 3, roots[i]);
+                if (sqlite3_step(mv.h) != SQLITE_DONE) return false;
+            }
+            Stmt m;
+            if (!m.prepare(db.h, "INSERT INTO meta(key,value) VALUES('next_id',?)"
+                                 " ON CONFLICT(key) DO UPDATE SET value=excluded.value"))
+                return false;
+            sqlite3_bind_int64(m.h, 1, id + 1);
+            if (sqlite3_step(m.h) != SQLITE_DONE) return false;
+            ws = id;
+        }
+        Stmt p;
+        if (!p.prepare(db.h, "INSERT OR IGNORE INTO pending_ws(id) VALUES(?)")) return false;
+        sqlite3_bind_int64(p.h, 1, ws);
+        if (sqlite3_step(p.h) != SQLITE_DONE) return false;
+    }
+    return true;
+}
+
+bool applyPendingWorkspaces(const Db& db) {
+    Stmt q;
+    if (!q.prepare(db.h, "UPDATE tasks SET workspace_at=? WHERE id IN (SELECT id FROM pending_ws)"))
+        return false;
+    sqlite3_bind_int64(q.h, 1, nowMs());
+    if (sqlite3_step(q.h) != SQLITE_DONE) return false;
+    return db.exec("DROP TABLE pending_ws");
+}
+
 // Bring an older file up to kSchemaVersion, one step at a time. No row is ever dropped,
 // and no state is lost: a step that removes a column must first move its information
 // somewhere else.
+bool upgradeSteps(const Db& db, int from);
+
+// All steps in one transaction: a step that fails part-way (the v4 fold writes several rows
+// before it drops a column) must leave the file exactly as it was, still readable as `from`.
 bool upgradeSchema(const Db& db) {
     const int from = userVersion(db);
     if (from < 0) return false;
     if (from == kSchemaVersion) return true;
     if (from > kSchemaVersion) return false;   // written by a newer build: refuse, don't corrupt
+    if (!db.exec("BEGIN IMMEDIATE")) return false;
+    if (!upgradeSteps(db, from)) {
+        db.exec("ROLLBACK");
+        return false;
+    }
+    return db.exec("COMMIT");
+}
+
+bool upgradeSteps(const Db& db, int from) {
     // 0 means this process just created the file, so kSchema already made it current.
     if (from >= 1) {
         if (from < 2 &&
@@ -135,11 +222,16 @@ bool upgradeSchema(const Db& db) {
             if (!db.exec("UPDATE tasks SET done_at=0 WHERE done=0 AND done_at!=0")) return false;
             if (!db.exec("ALTER TABLE tasks DROP COLUMN done")) return false;
         }
-        if (from < 4) {
-            // Trees: everything that exists already is the first workspace. (kSchema has
-            // already created the `trees` table and its 'main' row — CREATE IF NOT EXISTS —
-            // but not the column, since `tasks` existed.)
-            if (!db.exec("ALTER TABLE tasks ADD COLUMN tree INTEGER NOT NULL DEFAULT 1"))
+        if (from == 4 && !foldTreesIntoWorkspaces(db)) return false;
+        if (from < 5 &&
+            !db.exec("ALTER TABLE tasks ADD COLUMN workspace_at INTEGER NOT NULL DEFAULT 0"))
+            return false;
+        if (from == 4) {
+            // Now that every tree is a workspace task, the partition goes.
+            if (!applyPendingWorkspaces(db) ||
+                !db.exec("ALTER TABLE tasks DROP COLUMN tree") ||
+                !db.exec("DROP TABLE IF EXISTS trees") ||
+                !db.exec("DELETE FROM meta WHERE key='current_tree'"))
                 return false;
         }
     }
@@ -184,7 +276,7 @@ int ordOf(const std::unordered_map<TaskId, int>& ord, TaskId id) {
 // Do these two tasks produce identical columns? `children` is deliberately excluded —
 // it is stored as the children's own parent+ord, not on this row.
 bool sameRow(const Task& a, const Task& b) {
-    return a.parent == b.parent && a.tree == b.tree && a.text == b.text &&
+    return a.parent == b.parent && a.workspaceAt == b.workspaceAt && a.text == b.text &&
            a.collapsed == b.collapsed && a.status == b.status &&
            a.createdAt == b.createdAt && a.doneAt == b.doneAt;
 }
@@ -194,20 +286,7 @@ bool sameRow(const Task& a, const Task& b) {
 bool loadFromDb(const Db& db, Forest& f) {
     f.nodes.clear();
     f.roots.clear();
-    f.trees.clear();
     f.nextId = 1;
-
-    {
-        Stmt q;
-        if (!q.prepare(db.h, "SELECT id,name FROM trees WHERE deleted_at=0 ORDER BY ord, id")) return false;
-        while (sqlite3_step(q.h) == SQLITE_ROW) {
-            Tree t;
-            t.id = static_cast<TreeId>(sqlite3_column_int64(q.h, 0));
-            if (const unsigned char* s = sqlite3_column_text(q.h, 1))
-                t.name = reinterpret_cast<const char*>(s);
-            if (t.id != 0) f.trees.push_back(std::move(t));
-        }
-    }
 
     // Grouped by parent and in sibling order, so a single appending pass rebuilds
     // `children` and `roots` in exactly the order they were written.
@@ -215,7 +294,7 @@ bool loadFromDb(const Db& db, Forest& f) {
     {
         Stmt q;
         if (!q.prepare(db.h,
-                       "SELECT id,parent,text,collapsed,status,created_at,done_at,tree"
+                       "SELECT id,parent,text,collapsed,status,created_at,done_at,workspace_at"
                        " FROM tasks WHERE deleted_at=0 ORDER BY parent, ord, id"))
             return false;
         for (;;) {
@@ -233,7 +312,7 @@ bool loadFromDb(const Db& db, Forest& f) {
             t.status = sqlite3_column_int(q.h, 4);
             t.createdAt = sqlite3_column_int64(q.h, 5);
             t.doneAt = sqlite3_column_int64(q.h, 6);
-            t.tree = static_cast<TreeId>(sqlite3_column_int64(q.h, 7));
+            t.workspaceAt = sqlite3_column_int64(q.h, 7);
 
             rowOrder.push_back(t.id);
             f.nextId = std::max<TaskId>(f.nextId, t.id + 1);
@@ -255,7 +334,6 @@ bool loadFromDb(const Db& db, Forest& f) {
     if (m.prepare(db.h, "SELECT value FROM meta WHERE key='next_id'") &&
         sqlite3_step(m.h) == SQLITE_ROW)
         f.nextId = std::max<TaskId>(f.nextId, static_cast<TaskId>(sqlite3_column_int64(m.h, 0)));
-    f.normalizeTrees();
     return true;
 }
 
@@ -301,12 +379,12 @@ bool saveToDb(const Db& db, const Forest& f, const Forest* baseline) {
         // so writing one un-deletes its row (this is what makes undo-of-a-delete work).
         ok = up.prepare(db.h,
                         "INSERT INTO tasks(id,parent,ord,text,collapsed,status,"
-                        "created_at,done_at,deleted_at,tree) VALUES(?,?,?,?,?,?,?,?,0,?)"
+                        "created_at,done_at,deleted_at,workspace_at) VALUES(?,?,?,?,?,?,?,?,0,?)"
                         " ON CONFLICT(id) DO UPDATE SET parent=excluded.parent,"
                         " ord=excluded.ord, text=excluded.text,"
                         " collapsed=excluded.collapsed, status=excluded.status,"
                         " created_at=excluded.created_at, done_at=excluded.done_at,"
-                        " deleted_at=0, tree=excluded.tree");
+                        " deleted_at=0, workspace_at=excluded.workspace_at");
         for (TaskId id : upserts) {
             if (!ok) break;
             const Task* t = f.get(id);
@@ -321,7 +399,7 @@ bool saveToDb(const Db& db, const Forest& f, const Forest* baseline) {
             sqlite3_bind_int(up.h, 6, t->status);
             sqlite3_bind_int64(up.h, 7, t->createdAt);
             sqlite3_bind_int64(up.h, 8, t->doneAt);
-            sqlite3_bind_int64(up.h, 9, static_cast<sqlite3_int64>(t->tree));
+            sqlite3_bind_int64(up.h, 9, t->workspaceAt);
             ok = sqlite3_step(up.h) == SQLITE_DONE;
         }
     }
@@ -336,50 +414,6 @@ bool saveToDb(const Db& db, const Forest& f, const Forest* baseline) {
             if (!ok) break;
             sqlite3_reset(del.h);
             sqlite3_bind_int64(del.h, 1, when);
-            sqlite3_bind_int64(del.h, 2, static_cast<sqlite3_int64>(id));
-            ok = sqlite3_step(del.h) == SQLITE_DONE;
-        }
-    }
-
-    if (ok) {
-        // Trees: upsert one new to us, renamed, or moved in the list (all of them without a
-        // baseline), and soft-retire one we dropped — which only an undo of its creation
-        // does. Same baseline rule as tasks: absence alone is not proof of a deletion.
-        Stmt up;
-        ok = up.prepare(db.h, "INSERT INTO trees(id,name,ord,deleted_at) VALUES(?,?,?,0)"
-                              " ON CONFLICT(id) DO UPDATE SET name=excluded.name,"
-                              " ord=excluded.ord, deleted_at=0");
-        for (std::size_t i = 0; ok && i < f.trees.size(); ++i) {
-            const Tree& t = f.trees[i];
-            if (baseline) {
-                const auto& was = baseline->trees;
-                if (i < was.size() && was[i].id == t.id && was[i].name == t.name) continue;
-            }
-            sqlite3_reset(up.h);
-            sqlite3_bind_int64(up.h, 1, static_cast<sqlite3_int64>(t.id));
-            sqlite3_bind_text(up.h, 2, t.name.c_str(), -1, SQLITE_STATIC);
-            sqlite3_bind_int(up.h, 3, static_cast<int>(i));
-            ok = sqlite3_step(up.h) == SQLITE_DONE;
-        }
-        std::vector<TreeId> gone;
-        if (baseline) {
-            for (const Tree& t : baseline->trees)
-                if (!f.tree(t.id)) gone.push_back(t.id);
-        } else {
-            Stmt q;
-            ok = ok && q.prepare(db.h, "SELECT id FROM trees WHERE deleted_at=0");
-            while (ok && sqlite3_step(q.h) == SQLITE_ROW) {
-                const TreeId id = static_cast<TreeId>(sqlite3_column_int64(q.h, 0));
-                if (!f.tree(id)) gone.push_back(id);
-            }
-        }
-        Stmt del;
-        if (ok && !gone.empty())
-            ok = del.prepare(db.h, "UPDATE trees SET deleted_at=? WHERE id=? AND deleted_at=0");
-        for (TreeId id : gone) {
-            if (!ok) break;
-            sqlite3_reset(del.h);
-            sqlite3_bind_int64(del.h, 1, nowMs());
             sqlite3_bind_int64(del.h, 2, static_cast<sqlite3_int64>(id));
             ok = sqlite3_step(del.h) == SQLITE_DONE;
         }
@@ -479,22 +513,22 @@ bool Session::save(const Forest& f, const Forest* baseline) {
     return saveToDb(impl_->db, f, baseline);
 }
 
-TreeId Session::currentTree() {
-    if (!isDbPath(path_) || !impl_->ensureOpen(path_, false)) return 0;
+TaskId Session::currentView() {
+    if (!isDbPath(path_) || !impl_->ensureOpen(path_, false)) return kMainView;
     Stmt q;
-    if (!q.prepare(impl_->db.h, "SELECT value FROM meta WHERE key='current_tree'") ||
+    if (!q.prepare(impl_->db.h, "SELECT value FROM meta WHERE key='current_view'") ||
         sqlite3_step(q.h) != SQLITE_ROW)
-        return 0;
-    return static_cast<TreeId>(sqlite3_column_int64(q.h, 0));
+        return kMainView;
+    return static_cast<TaskId>(sqlite3_column_int64(q.h, 0));
 }
 
-bool Session::setCurrentTree(TreeId tree) {
+bool Session::setCurrentView(TaskId view) {
     if (!isDbPath(path_) || !impl_->ensureOpen(path_, true)) return false;
     Stmt q;
-    if (!q.prepare(impl_->db.h, "INSERT INTO meta(key,value) VALUES('current_tree',?)"
+    if (!q.prepare(impl_->db.h, "INSERT INTO meta(key,value) VALUES('current_view',?)"
                                 " ON CONFLICT(key) DO UPDATE SET value=excluded.value"))
         return false;
-    sqlite3_bind_int64(q.h, 1, static_cast<sqlite3_int64>(tree));
+    sqlite3_bind_int64(q.h, 1, static_cast<sqlite3_int64>(view));
     return sqlite3_step(q.h) == SQLITE_DONE;
 }
 

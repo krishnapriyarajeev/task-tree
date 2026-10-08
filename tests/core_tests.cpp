@@ -233,52 +233,32 @@ int main() {
         CHECK(f.get(p)->children.size() == 2, "the done parent lost that child");
     }
 
-    { // Trees: a subtree always shares its root's tree, through every move.
-        std::printf("[model] trees\n");
+    { // Workspaces: a marked task; navigation walks the marks, the DONE section scopes.
+        std::printf("[model] workspaces\n");
         Forest f;
-        CHECK(f.trees.size() == 1 && f.trees[0].name == "main", "a forest starts with 'main'");
-        const TaskId a = f.addTask("a");
-        const TaskId a1 = f.addTask("a1", a);
-        const TreeId side = f.addTree("side");
-        CHECK(side == 2 && f.tree(side) && f.tree(side)->name == "side", "addTree");
-        const TaskId b = f.addTask("b", kNoParent, 0, side);
-        const TaskId b1 = f.addTask("b1", b);
-        CHECK(f.treeOf(b) == side && f.treeOf(b1) == side, "a child joins its parent's tree");
-        CHECK(f.rootsOf(kDefaultTree) == std::vector<TaskId>{a}, "rootsOf main");
-        CHECK(f.rootsOf(side) == std::vector<TaskId>{b}, "rootsOf side");
-
-        CHECK(f.reparent(a, b1, 0), "drop a under b1");
-        CHECK(f.treeOf(a) == side && f.treeOf(a1) == side, "the whole subtree changed tree");
-        CHECK(f.reparent(a, kNoParent, 99), "back to the top level");
-        CHECK(f.treeOf(a) == side, "a made-root keeps the tree it was in");
-
-        CHECK(f.moveToTree(a, kDefaultTree), "moveToTree");
-        CHECK(f.get(a)->parent == kNoParent && f.rootsOf(kDefaultTree) == std::vector<TaskId>{a},
-              "lands as a top-level task of the target");
-        CHECK(f.treeOf(a1) == kDefaultTree, "with its descendants");
-        CHECK(!f.moveToTree(a, kDefaultTree), "already a root there: no-op");
-        CHECK(!f.moveToTree(a, 42), "unknown tree refused");
-        CHECK(f.moveToTree(b1, kDefaultTree) && f.get(b)->children.empty(),
-              "a mid-tree node is detached from its old parent");
-
-        f.markDone(a1);
-        f.markDone(b);
-        CHECK(f.doneSectionRoots(kDefaultTree) == std::vector<TaskId>{a1}, "DONE per tree");
-        CHECK(f.doneSectionRoots(side) == std::vector<TaskId>{b}, "DONE per tree (side)");
-        CHECK(f.doneSectionRoots().size() == 2, "unfiltered DONE sees both");
-
+        const TaskId work = f.addTask("work");
+        const TaskId amqp = f.addTask("amqp", work);
+        const TaskId leaf = f.addTask("leaf", amqp);
+        const TaskId other = f.addTask("other");
+        CHECK(f.workspaces().empty(), "nothing is a workspace by default");
+        f.get(amqp)->workspaceAt = 20;
+        f.get(work)->workspaceAt = 10;
+        CHECK((f.workspaces() == std::vector<TaskId>{work, amqp}), "oldest first");
+        CHECK(f.nearestWorkspace(leaf) == amqp, "nearest at/above: the enclosing one");
+        CHECK(f.nearestWorkspace(amqp) == amqp, "a workspace is its own nearest");
+        CHECK(f.nearestWorkspace(leaf, amqp) == 0, "stopAt is excluded (Ctrl+Down inside amqp)");
+        CHECK(f.nearestWorkspace(f.get(amqp)->parent) == work, "Ctrl+Up from amqp -> work");
+        CHECK(f.nearestWorkspace(other) == 0, "outside every workspace -> main");
+        f.markDone(leaf);
+        f.markDone(other);
+        CHECK((f.doneSectionRoots(amqp) == std::vector<TaskId>{leaf}), "DONE scoped to the view");
+        CHECK(f.doneSectionRoots(kMainView).size() == 2, "main sees all");
+        f.markDone(work);
+        CHECK(f.workspaces().empty(), "a done subtree's workspaces drop out of the list");
         Forest g = f;
         CHECK(equivalent(f, g), "copies are equivalent");
-        g.trees[1].name = "renamed";
-        CHECK(!equivalent(f, g), "a tree rename is a difference");
-
-        // normalizeTrees: stray tree ids fall back to the first tree; children follow roots.
-        Forest h;
-        const TaskId r = h.addTask("r", kNoParent, 0, 9);
-        const TaskId c = h.addTask("c", r);
-        h.get(c)->tree = 5;
-        h.normalizeTrees();
-        CHECK(h.treeOf(r) == kDefaultTree && h.treeOf(c) == kDefaultTree, "normalizeTrees");
+        g.get(amqp)->workspaceAt = 0;
+        CHECK(!equivalent(f, g), "unmarking is a difference");
     }
 
     { // repairAfterLoad: `parent` and `children` are two encodings of one edge, and a file
@@ -445,17 +425,13 @@ int main() {
         CHECK(std::string(infoFor(Mode::Select)->name) == "select", "select's chip label");
         CHECK(infoFor(Mode::Add) == nullptr, "add has no chip");
         CHECK(modes().size() == 5, "five modes are offered in the menu");
-        CHECK(modeForPrefix('@') == Mode::Tree, "@ -> tree switcher");
-        CHECK(modeForPrefix('+') == Mode::NewTree, "+ -> new tree");
-
-        CHECK(interpret(Mode::Tree, " wo ").kind == Kind::SwitchTree, "tree mode -> switch");
-        CHECK(interpret(Mode::Tree, " wo ").query == "wo", "switch query trimmed");
-        CHECK(interpret(Mode::NewTree, " side ").kind == Kind::NewTree, "new tree");
-        CHECK(interpret(Mode::NewTree, " side ").body == "side", "new tree name trimmed");
-        CHECK(interpret(Mode::Parent, "@ work").kind == Kind::MoveToTree, ">@ -> move to tree");
-        CHECK(interpret(Mode::Parent, "@ work").query == "work", "move query trimmed");
-        CHECK(interpret(Mode::Parent, "@").picksTree(), "bare >@ lists trees");
-        CHECK(interpret(Mode::Parent, "x@y").kind == Kind::ParentText, "@ mid-text is text");
+        CHECK(modeForPrefix('@') == Mode::Workspace, "@ -> workspace switcher");
+        CHECK(modeForPrefix('+') == Mode::NewWorkspace, "+ -> new workspace");
+        CHECK(interpret(Mode::Workspace, " wo ").kind == Kind::GoWorkspace, "@ -> go");
+        CHECK(interpret(Mode::Workspace, " wo ").query == "wo", "go query trimmed");
+        CHECK(interpret(Mode::Workspace, "").picksWorkspace(), "@ lists workspaces");
+        CHECK(interpret(Mode::NewWorkspace, " side ").kind == Kind::NewWorkspace, "new ws");
+        CHECK(interpret(Mode::NewWorkspace, " side ").body == "side", "new ws name trimmed");
 
         CHECK(interpret(Mode::Add, "buy milk").kind == Kind::AddTask, "add mode -> add");
         CHECK(interpret(Mode::Add, "buy milk").body == "buy milk", "add keeps the text");
@@ -536,22 +512,21 @@ int main() {
     }
 
     { // shortDate: the tiny chip date ("jul 27", year added only when it differs)
-        { // tree ranking + per-tree node search
+        { // workspace ranking + per-view node search
             using namespace tt::palette;
             Forest f;
-            const TreeId work = f.addTree("work");
-            const TreeId home = f.addTree("homework");
-            CHECK((rankTrees(f, "") == std::vector<TreeId>{kDefaultTree, work, home}),
-                  "empty query lists every tree in order");
-            CHECK((rankTrees(f, "WORK") == std::vector<TreeId>{work, home}),
-                  "prefix match and the tighter name first");
-            CHECK(rankTrees(f, "zzz").empty(), "no match");
-            const TaskId a = f.addTask("alpha", kNoParent, 0, work);
+            const TaskId w = f.addTask("work");
+            const TaskId h = f.addTask("homework");
+            const TaskId a = f.addTask("alpha", w);
             const TaskId b = f.addTask("alpha two");
-            CHECK(rankMatches(f, "alpha").size() == 2, "0 searches every tree");
-            CHECK((rankMatches(f, "alpha", 0, work) == std::vector<TaskId>{a}), "work only");
-            CHECK((rankMatches(f, "alpha", 0, kDefaultTree) == std::vector<TaskId>{b}),
-                  "main only");
+            f.get(w)->workspaceAt = 1;
+            f.get(h)->workspaceAt = 2;
+            CHECK((rankWorkspaces(f, "") == std::vector<TaskId>{w, h}), "empty lists all, oldest first");
+            CHECK((rankWorkspaces(f, "WORK") == std::vector<TaskId>{w, h}), "prefix match first");
+            CHECK(rankWorkspaces(f, "alpha").empty(), "plain tasks are not workspaces");
+            CHECK(rankMatches(f, "alpha").size() == 2, "main searches everything");
+            CHECK((rankMatches(f, "alpha", 0, w) == std::vector<TaskId>{a}), "scoped to work");
+            (void)b;
         }
 
         std::printf("[dates] shortDate\n");

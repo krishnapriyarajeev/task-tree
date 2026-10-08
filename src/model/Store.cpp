@@ -82,17 +82,7 @@ bool loadJson(Forest& f, const std::string& path) {
 
     f.nodes.clear();
     f.roots.clear();
-    f.trees.clear();
     f.nextId = 1;
-
-    if (const auto it = j.find("trees"); it != j.end() && it->is_array())
-        for (const auto& jt : *it) {
-            if (!jt.is_object()) continue;
-            Tree t;
-            t.id = static_cast<TreeId>(idField(jt, "id"));
-            t.name = strField(jt, "name");
-            if (t.id != 0) f.trees.push_back(std::move(t));
-        }
 
     const json* tasks = j.contains("tasks") && j["tasks"].is_array() ? &j["tasks"] : nullptr;
     if (tasks) for (const auto& jt : *tasks) {
@@ -106,7 +96,7 @@ bool loadJson(Forest& f, const std::string& path) {
         t.status = static_cast<int>(numField(jt, "status"));
         t.createdAt = numField(jt, "createdAt");
         t.doneAt = numField(jt, "doneAt");
-        t.tree = static_cast<TreeId>(numField(jt, "tree", static_cast<std::int64_t>(kDefaultTree)));
+        t.workspaceAt = numField(jt, "workspaceAt");
         // "done" is a legacy key: completion used to be a boolean beside the timestamp, and
         // tasks finished before the timestamp existed have done=true with doneAt=0. Those
         // must become kDoneAtUnknown, or reading an old file would un-complete every one of
@@ -151,7 +141,6 @@ bool loadJson(Forest& f, const std::string& path) {
     // edge, and an older or hand-written file may have only the former. Reconcile them so no
     // task is left existing-but-unreachable.
     f.repairAfterLoad();
-    f.normalizeTrees();
     return true;
 }
 
@@ -210,19 +199,16 @@ bool saveJson(const Forest& f, const std::string& path) {
             {"status", t.status},
             {"createdAt", t.createdAt},
             {"doneAt", t.doneAt},
-            {"tree", t.tree},
+            {"workspaceAt", t.workspaceAt},
             {"children", t.children},
         });
     }
-    json trees = json::array();
-    for (const Tree& t : f.trees) trees.push_back({{"id", t.id}, {"name", t.name}});
     // No "doneRoots": every top-level task is in `roots` now, done or not (loadJson still
     // reads the old key so pre-existing files keep working).
     json j = {
         {"version", 2},
         {"nextId", f.nextId},
         {"roots", f.roots},
-        {"trees", std::move(trees)},
         {"tasks", std::move(tasks)},
     };
 

@@ -242,8 +242,8 @@ int main() {
     std::fprintf(stderr, "Input bar doubles as a command palette — type '/' on the empty bar "
                          "to list modes: '?' find, ':' select (id or text), '>' reparent the "
                          "selection. Esc or Backspace leaves a mode; Ctrl+F = '?'.\n");
-    std::fprintf(stderr, "Trees: top-left picker. Ctrl+T switch ('@'), Ctrl+Shift+T new ('+'), "
-                         "Ctrl+PgUp/PgDn cycle, Ctrl+Shift+M move the selection ('>@').\n");
+    std::fprintf(stderr, "Workspaces: Ctrl+T marks the selected node as one, Ctrl+Down enters, "
+                         "Ctrl+Up goes up a level; '@' jumps by name, top-left picker lists them.\n");
 
     // On-demand event loop: blocks (~0 CPU) when idle, wakes on input/hotkey.
     while (!glfwWindowShouldClose(win)) {

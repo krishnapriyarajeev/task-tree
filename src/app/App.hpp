@@ -184,31 +184,45 @@ private:
     std::string toastText_;   // what the pill says ("Copied", "Moved to work", …)
     void showToast(std::string text, TaskId anchor = 0);   // anchor 0 = upper-centre
 
-    // Trees (workspaces). The canvas, the DONE panel, search and the classifier outline all
-    // show only `currentTree_`; the Forest holds every tree. Which one is showing is view
-    // state, persisted in the store's meta (Session::currentTree) rather than the Forest,
-    // so undo never switches trees. Each tree remembers its own camera for the session.
-    TreeId currentTree_ = kDefaultTree;
+    // Workspaces. A workspace is a marked task (Task::workspaceAt); entering one shows only
+    // its subtree, and the canvas, DONE panel, search, new tasks and the classifier outline
+    // all scope to it. `view_` is that task (kMainView = the whole forest). Which view is
+    // showing is view state, persisted in the store's meta (Session::currentView) rather
+    // than the Forest, so undo never moves you. Each view remembers its own camera.
+    TaskId view_ = kMainView;
     struct View { Vec2 pan; float zoom = 1.f; };
-    std::unordered_map<TreeId, View> views_;
-    // Set by a tree switch; the next frame (after relayout) recentres the camera if not one
-    // of the tree's nodes is on screen. A remembered view can go stale — the tree changed
+    std::unordered_map<TaskId, View> views_;
+    // Set by a view change; the next frame (after relayout) recentres the camera if not one
+    // of the view's nodes is on screen. A remembered view can go stale — the tree changed
     // under it, or the window/monitor did — and an empty canvas reads as "my tasks are gone".
     bool verifyView_ = false;
-    std::vector<TreeId> treeCands_;    // ranked trees for the '@' / '>@' commands
-    bool treeMenuOpen_ = false;        // the top-left picker's list is showing
-    TreePickerLayout picker_;          // last frame's picker geometry (for hit tests)
-    void   switchTree(TreeId tree);            // show another tree (no-op if current/unknown)
-    void   cycleTree(int delta);               // Ctrl+PgUp/PgDn: previous/next tree
-    void   createTree(const std::string& name);  // new tree + a root node, then switch
-    void   moveSelectedToTree(TreeId tree);    // the selected subtree -> tree's top level
-    void   enterMoveToTree();                  // Ctrl+Shift+M: the bar as '>@'
-    void   ensureCurrentTree();                // after undo/reload: fall back if it vanished
-    std::string treeName(TreeId tree) const;
-    TreeId activeTree() const;                 // treeCands_[candidateIdx_] (0 if none)
+    // Enter/leave transition: nodes present in both layouts glide from where they were on
+    // screen to where they land; nodes only in the old one fade out, new ones fade in.
+    bool transActive_ = false;
+    double transStart_ = 0.0;
+    std::unordered_map<TaskId, Rect> transFrom_;   // SCREEN rects at the moment of switching
+    std::unordered_map<TaskId, Rect> animRects_;   // this frame's in-between world rects
+    std::unordered_map<TaskId, float> fade_;       // this frame's per-node opacity
+    void   buildTransitionFrame();                 // fills animRects_/fade_ (or ends it)
+
+    std::vector<TaskId> wsCands_;      // '@' rows; kMainView (0) is the "main" row
+    bool viewMenuOpen_ = false;        // the top-left picker's list is showing
+    ViewPickerLayout picker_;          // last frame's picker geometry (for hit tests)
+    std::vector<TaskId> pickerViews_;  // the view each picker row opens (kMainView first)
+    void   enterView(TaskId view);             // animated switch (no-op if already there)
+    void   viewUp();                           // Ctrl+Up: the enclosing workspace, or main
+    void   viewDown();                         // Ctrl+Down: the selection's workspace
+    void   toggleWorkspace();                  // Ctrl+T: mark/unmark the selected node
+    void   createWorkspace(const std::string& name);  // new node in this view, marked, entered
+    void   ensureView();                       // leave a view whose node is gone/done/unmarked
+    bool   inView(TaskId id) const;            // is `id` inside the current view's subtree?
+    std::string viewName(TaskId view) const;   // "main" or the workspace's text
+    std::string breadcrumb() const;            // "main › work › amqp"
+    std::vector<std::pair<TaskId, int>> workspaceOutline() const;  // tree order + depth
+    bool   hasWsCandidate() const { return candidateIdx_ < wsCands_.size(); }
     std::size_t paletteRows() const;           // rows in whichever drop-up list is open
-    void   layoutTreePicker(int winW);
-    bool   handleTreePickerClick();            // true if the click belonged to the picker
+    void   layoutViewPicker(int winW);
+    bool   handleViewPickerClick();            // true if the click belonged to the picker
 
     // Canvas view transform (screen = pan + zoom * world). Screen-space UI is unaffected.
     Vec2  pan_;

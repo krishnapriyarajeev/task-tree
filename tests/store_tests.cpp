@@ -498,69 +498,67 @@ int main() {
         removeDb(db);
     }
 
-    // ---- Schema upgrade 3 -> 4 (trees): everything lands in tree 1, "main" ---------
+    // ---- Schema upgrade 4 -> 5: trees fold into workspace tasks -------------------
     {
-        const std::string db = tmpFile("schema_v3.db").string();
+        const std::string db = tmpFile("schema_v4.db").string();
         removeDb(db);
         {
             sqlite3* h = nullptr;
-            CHECK(sqlite3_open(db.c_str(), &h) == SQLITE_OK, "create a v3 DB");
-            const char* v3 =
+            CHECK(sqlite3_open(db.c_str(), &h) == SQLITE_OK, "create a v4 DB");
+            const char* v4 =
                 "CREATE TABLE tasks(id INTEGER PRIMARY KEY, parent INTEGER NOT NULL DEFAULT 0,"
                 " ord INTEGER NOT NULL DEFAULT 0, text TEXT NOT NULL DEFAULT '',"
                 " collapsed INTEGER NOT NULL DEFAULT 0, status INTEGER NOT NULL DEFAULT 0,"
                 " created_at INTEGER NOT NULL DEFAULT 0, done_at INTEGER NOT NULL DEFAULT 0,"
-                " deleted_at INTEGER NOT NULL DEFAULT 0);"
+                " deleted_at INTEGER NOT NULL DEFAULT 0, tree INTEGER NOT NULL DEFAULT 1);"
+                "CREATE TABLE trees(id INTEGER PRIMARY KEY, name TEXT NOT NULL DEFAULT '',"
+                " ord INTEGER NOT NULL DEFAULT 0, deleted_at INTEGER NOT NULL DEFAULT 0);"
                 "CREATE TABLE meta(key TEXT PRIMARY KEY, value NOT NULL);"
-                "INSERT INTO tasks(id,parent,ord,text,done_at) VALUES"
-                "  (1,0,0,'root',0),(2,1,0,'child',0),(3,0,1,'done root',-1);"
-                "INSERT INTO meta VALUES('next_id',4);"
-                "PRAGMA user_version=3;";
-            CHECK(sqlite3_exec(h, v3, nullptr, nullptr, nullptr) == SQLITE_OK, "seed v3 rows");
+                "INSERT INTO trees VALUES(1,'main',0,0),(2,'solo',1,0),(3,'multi',2,0),(4,'empty',3,0);"
+                "INSERT INTO tasks(id,parent,ord,text,tree) VALUES"
+                "  (1,0,0,'main root',1),(2,1,0,'main child',1),"
+                "  (3,0,1,'solo root',2),(4,3,0,'solo child',2),"
+                "  (5,0,2,'multi a',3),(6,0,3,'multi b',3);"
+                "INSERT INTO meta VALUES('next_id',7),('current_tree',2);"
+                "PRAGMA user_version=4;";
+            CHECK(sqlite3_exec(h, v4, nullptr, nullptr, nullptr) == SQLITE_OK, "seed v4 rows");
             sqlite3_close(h);
         }
         Forest g;
-        CHECK(store::loadDb(g, db), "a v3 DB still loads");
-        CHECK(g.size() == 3, "every v3 row survived");
-        CHECK(rawUserVersion(db) == 4, "user_version bumped to 4");
-        CHECK(g.trees.size() == 1 && g.trees[0].id == kDefaultTree && g.trees[0].name == "main",
-              "the existing tasks form the 'main' tree");
-        CHECK(g.treeOf(1) == kDefaultTree && g.treeOf(2) == kDefaultTree &&
-              g.treeOf(3) == kDefaultTree, "every task is in it");
-        CHECK(g.get(3)->doneAt == kDoneAtUnknown, "done state untouched");
-
-        // Trees round-trip, and an incremental save carries a new tree + a moved subtree.
-        Forest base = g;
-        const TreeId side = g.addTree("side");
-        CHECK(g.moveToTree(1, side), "move the root to the new tree");
-        CHECK(store::saveDb(g, db, &base), "incremental save with a new tree");
-        Forest h;
-        CHECK(store::loadDb(h, db), "reload");
-        CHECK(equivalent(g, h), "trees + task trees round-trip exactly");
-        CHECK(h.treeOf(2) == side, "the child followed its root");
-
-        // Undoing the creation (tree + its tasks gone from the forest) retires the tree row.
-        Forest undone = base;
-        CHECK(store::saveDb(undone, db, &h), "save the undone state");
-        Forest k;
-        CHECK(store::loadDb(k, db), "reload after undo");
-        CHECK(k.trees.size() == 1 && !k.tree(side), "the undone tree does not come back");
-        CHECK(equivalent(k, undone), "undone state round-trips");
+        CHECK(store::loadDb(g, db), "a v4 DB loads");
+        CHECK(rawUserVersion(db) == 5, "user_version bumped to 5");
+        CHECK(g.size() == 7, "every row kept, plus one wrapper for the multi-root tree");
+        CHECK(g.get(3) && g.get(3)->isWorkspace() && g.get(3)->parent == kNoParent,
+              "a one-root tree's root becomes the workspace, in place");
+        CHECK(g.get(4)->parent == 3 && !g.get(4)->isWorkspace(), "its child untouched");
+        const TaskId wrap = 7;
+        CHECK(g.get(wrap) && g.get(wrap)->text == "multi" && g.get(wrap)->isWorkspace(),
+              "a multi-root tree gets a wrapper task named after it");
+        CHECK((g.get(wrap)->children == std::vector<TaskId>{5, 6}), "holding its roots in order");
+        CHECK(g.nextId == 8, "next_id moved past the wrapper");
+        CHECK(!g.get(1)->isWorkspace(), "main's tasks are not workspaces");
+        CHECK(g.workspaces().size() == 2, "two workspaces; the empty tree is dropped");
+        CHECK(g.roots.size() == 3, "main shows everything again: 3 top-level tasks");
+        store::Session s(db);
+        CHECK(s.currentView() == kMainView, "the old current_tree is not a view id");
         removeDb(db);
     }
 
-    // ---- current_tree lives in meta, outside the Forest ---------------------------
+    // ---- current_view lives in meta, outside the Forest ---------------------------
     {
-        const std::string db = tmpFile("current_tree.db").string();
+        const std::string db = tmpFile("current_view.db").string();
         removeDb(db);
         Forest f;
-        f.addTask("x");
+        const TaskId w = f.addTask("x");
+        f.get(w)->workspaceAt = 5;
         store::Session s(db);
         CHECK(s.save(f), "create the store");
-        CHECK(s.currentTree() == 0, "unset -> 0");
-        CHECK(s.setCurrentTree(7) && s.currentTree() == 7, "set + read back");
+        CHECK(s.currentView() == kMainView, "unset -> main");
+        CHECK(s.setCurrentView(w) && s.currentView() == w, "set + read back");
         store::Session s2(db);
-        CHECK(s2.currentTree() == 7, "survives a new connection");
+        CHECK(s2.currentView() == w, "survives a new connection");
+        Forest back;
+        CHECK(s2.load(back) && equivalent(f, back), "workspace_at round-trips");
         removeDb(db);
     }
 
