@@ -35,6 +35,10 @@ struct Config {
     Color nodeTextDark{0.14f, 0.11f, 0.04f, 1.f};   // text on the bright status fills
     Color nodeFillInProgress{0.85f, 0.72f, 0.20f, 0.97f}; // right-click 1: yellow
     Color nodeFillPriority  {0.90f, 0.52f, 0.16f, 0.97f}; // right-click 2: orange
+    // Workspace nodes (Ctrl+T): headers, not work — a muted violet in the node-fill family,
+    // matching the violet of the workspace palette modes and the stacked-card edge.
+    Color nodeFillWorkspace {0.23f, 0.18f, 0.36f, 0.97f};
+    Color nodeBorderWorkspace{0.73f, 0.59f, 1.00f, 0.95f};
     Color idBadgeBg   {0.24f, 0.30f, 0.46f, 1.f};   // node id label background
     Color idBadgeText {0.86f, 0.90f, 1.00f, 1.f};
     Color edgeColor   {0.50f, 0.58f, 0.70f, 0.85f};

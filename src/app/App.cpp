@@ -576,7 +576,12 @@ void App::onMouseButton(int button, int action, int mods) {
     if (button == GLFW_MOUSE_BUTTON_RIGHT) {
         if (action == GLFW_PRESS && !pointInPanel(mouse_)) {
             const TaskId id = hitTest(worldMouse());
-            if (Task* t = forest_.get(id)) { history_.snapshot(forest_); t->status = (t->status + 1) % 3; save(); }
+            // Workspaces are headers: they carry no status, so right-click leaves them be.
+            if (Task* t = forest_.get(id); t && !t->isWorkspace()) {
+                history_.snapshot(forest_);
+                t->status = (t->status + 1) % 3;
+                save();
+            }
         }
         return;
     }
@@ -1390,6 +1395,7 @@ void App::toggleWorkspace() {
     history_.snapshot(forest_);
     t->workspaceAt = t->isWorkspace() ? 0 : nowMs();
     const bool on = t->isWorkspace();
+    if (on) t->status = 0;   // a header has no status (undo brings it back)
     forceRelayout();   // the marker changes; and unmarking the current view leaves it
     save();
     showToast(on ? "workspace · Ctrl+Down enters" : "no longer a workspace", selected_);

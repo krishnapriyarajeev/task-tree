@@ -378,6 +378,10 @@ int cmdStatus(const Args& a, const std::string& path, Forest& baseline, std::ost
     Forest work = baseline;
     TaskId id = 0;
     if (const Exit e = resolveNode(work, a.rest[0], id, err); e != kOk) return e;
+    if (work.get(id)->isWorkspace() && s != 0) {
+        err << "#" << id << " is a workspace — workspaces take no status\n";
+        return kUsage;
+    }
     work.get(id)->status = s;
     return saveStore(work, path, baseline, err);
 }
@@ -406,6 +410,7 @@ int cmdWorkspace(const Args& a, const std::string& path, Forest& baseline, std::
     if (const Exit e = resolveNode(work, a.rest.front(), id, err); e != kOk) return e;
     Task& t = *work.get(id);
     t.workspaceAt = t.isWorkspace() ? 0 : nowMs();
+    if (t.isWorkspace()) t.status = 0;   // workspaces are headers: no status (as Ctrl+T)
     if (const Exit e = saveStore(work, path, baseline, err); e != kOk) return e;
     const bool on = t.isWorkspace();
     if (a.json) out << json{{"id", id}, {"workspace", on}}.dump() << "\n";

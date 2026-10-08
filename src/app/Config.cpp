@@ -52,6 +52,8 @@ Config loadConfig(const std::string& path) {
     c.nodeTextDark = col("theme.node_text_dark", c.nodeTextDark);
     c.nodeFillInProgress = col("theme.node_fill_in_progress", c.nodeFillInProgress);
     c.nodeFillPriority   = col("theme.node_fill_priority", c.nodeFillPriority);
+    c.nodeFillWorkspace  = col("theme.node_fill_workspace", c.nodeFillWorkspace);
+    c.nodeBorderWorkspace = col("theme.node_border_workspace", c.nodeBorderWorkspace);
     c.idBadgeBg    = col("theme.id_badge_bg", c.idBadgeBg);
     c.idBadgeText  = col("theme.id_badge_text", c.idBadgeText);
     c.edgeColor    = col("theme.edge", c.edgeColor);
@@ -106,6 +108,9 @@ bool saveConfig(const Config& c, const std::string& path) {
       << "node_text_dark        = \"" << colorToHex(c.nodeTextDark) << "\"\n"
       << "node_fill_in_progress = \"" << colorToHex(c.nodeFillInProgress) << "\"\n"
       << "node_fill_priority    = \"" << colorToHex(c.nodeFillPriority) << "\"\n"
+      << "# Workspace nodes (Ctrl+T) — headers, so they take no status colour\n"
+      << "node_fill_workspace   = \"" << colorToHex(c.nodeFillWorkspace) << "\"\n"
+      << "node_border_workspace = \"" << colorToHex(c.nodeBorderWorkspace) << "\"\n"
       << "id_badge_bg     = \"" << colorToHex(c.idBadgeBg) << "\"\n"
       << "id_badge_text   = \"" << colorToHex(c.idBadgeText) << "\"\n"
       << "edge            = \"" << colorToHex(c.edgeColor) << "\"\n"

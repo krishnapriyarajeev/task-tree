@@ -169,10 +169,16 @@ int main() {
         removeDb(db);
         const TaskId a = add(db, "alpha");
         add(db, "alpha child", a);
+        call({"status", std::to_string(a), "in-progress", "--store", db});
         Res r = call({"workspace", std::to_string(a), "--store", db});
+        Forest f;
+        store::load(f, db);
+        CHECK(f.get(a)->status == 0, "marking clears the status");
         CHECK(r.code == cli::kOk && r.out.find("is now a workspace") != std::string::npos, "mark");
         r = call({"workspaces", "--store", db});
         CHECK(r.out.find("#" + std::to_string(a) + " alpha") != std::string::npos, "listed");
+        CHECK(call({"status", std::to_string(a), "priority", "--store", db}).code == cli::kUsage,
+              "a workspace takes no status");
         r = call({"tree", "--store", db});
         CHECK(r.out.find("[workspace]") != std::string::npos, "outline tags it");
         r = call({"workspace", std::to_string(a), "--store", db});

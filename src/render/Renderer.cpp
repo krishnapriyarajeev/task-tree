@@ -124,11 +124,15 @@ void Renderer::drawEdge(const Rect& parent, const Rect& child, const Config& cfg
 void Renderer::drawNode(const Rect& r, const std::string& text, const Config& cfg,
                         bool highlight, float alphaMul, TaskId id, int status,
                         const std::string& dateChip, bool workspace) const {
-    // Fill + text colour depend on the status (right-click cycles it).
-    const Color fillC = (status == 1) ? cfg.nodeFillInProgress
+    // Fill + text colour depend on the status (right-click cycles it). A workspace is a
+    // header, not work: it has its own colour and no status.
+    if (workspace) status = 0;
+    const Color fillC = workspace     ? cfg.nodeFillWorkspace
+                      : (status == 1) ? cfg.nodeFillInProgress
                       : (status == 2) ? cfg.nodeFillPriority
                                       : cfg.nodeFill;
     const Color textC = (status == 0) ? cfg.nodeText : cfg.nodeTextDark;
+    const Color borderC = workspace ? cfg.nodeBorderWorkspace : cfg.nodeBorder;
 
     // A workspace reads as a stack of cards: a second card peeking out behind it, offset
     // down-right — "there is a place in here you can enter" (Ctrl+Down).
@@ -136,9 +140,9 @@ void Renderer::drawNode(const Rect& r, const std::string& text, const Config& cf
         const float o = 5.f;
         nvgBeginPath(vg_);
         nvgRoundedRect(vg_, r.x + o, r.y + o, r.w, r.h, cfg.cornerRadius);
-        nvgFillColor(vg_, col(cfg.nodeFill, alphaMul));
+        nvgFillColor(vg_, col(cfg.nodeFillWorkspace, alphaMul));
         nvgFill(vg_);
-        nvgStrokeColor(vg_, nvgRGBAf(185 / 255.f, 150 / 255.f, 1.f, 0.9f * alphaMul));
+        nvgStrokeColor(vg_, col(cfg.nodeBorderWorkspace, 0.6f * alphaMul));
         nvgStrokeWidth(vg_, cfg.borderWidth);
         nvgStroke(vg_);
     }
@@ -147,7 +151,7 @@ void Renderer::drawNode(const Rect& r, const std::string& text, const Config& cf
     nvgRoundedRect(vg_, r.x, r.y, r.w, r.h, cfg.cornerRadius);
     nvgFillColor(vg_, col(fillC, alphaMul));
     nvgFill(vg_);
-    nvgStrokeColor(vg_, col(highlight ? cfg.dropHint : cfg.nodeBorder, alphaMul));
+    nvgStrokeColor(vg_, col(highlight ? cfg.dropHint : borderC, alphaMul));
     nvgStrokeWidth(vg_, cfg.borderWidth * (highlight ? 2.2f : 1.f));
     nvgStroke(vg_);
 
