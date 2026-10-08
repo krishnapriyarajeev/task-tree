@@ -15,7 +15,7 @@ the task's text.
 
 ### Requirement: The selected node's description is shown in a card
 While a canvas node is selected, the overlay SHALL show its description in a card at the
-bottom-right, clear of the input bar and of the DONE panel when revealed.
+bottom-left, clear of the input bar.
 
 #### Scenario: Empty description
 - **WHEN** the selected node has no description
@@ -37,6 +37,11 @@ changes the text SHALL be one undo step.
 #### Scenario: Cancel
 - **WHEN** the user edits and presses Esc
 - **THEN** the description is unchanged and no undo entry is added
+
+#### Scenario: Undo while editing
+- **WHEN** the user types two words while editing and presses Ctrl+Z
+- **THEN** the second word is removed and the first remains; Ctrl+Shift+Z restores it
+- **AND** the tree's own undo history is untouched
 
 ### Requirement: Nodes with a description are marked
 A node whose description is non-empty SHALL show a small marker in its top band.

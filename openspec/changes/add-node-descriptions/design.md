@@ -15,12 +15,12 @@ Not a side table: it is 1:1 with the task, is soft-deleted with it, and must be 
 snapshots and baseline diffs exactly like `text`. `sameRow` compares it; the upsert writes
 it. The JSON store gains `"description"`. Empty string = none (no separate flag).
 
-### 2. The card lives bottom-right, anchored above the input bar's baseline
-The input bar is centred and at most 620 px wide, so the bottom-right is free. The card is
-~360 px wide (clamped to the free width), grows with its content up to ~45 % of the window
-height, then scrolls (mouse wheel over it). When the DONE panel is revealed (pinned or
-hovered), the card's right edge moves to the panel's left edge. Same chrome as the palette
-drop-up (`drawFieldChrome`) so it reads as part of the HUD.
+### 2. The card lives bottom-left, anchored to the input bar's baseline
+The input bar is centred and at most 620 px wide, so the bottom-left is free — and unlike
+the bottom-right, never under the DONE panel. The card is ~360 px wide (clamped to the free
+width left of the bar), grows with its content up to ~45 % of the window height, then
+scrolls (mouse wheel over it). Same chrome as the palette drop-up (`drawFieldChrome`) so it
+reads as part of the HUD.
 
 Shown only while a canvas node is selected. Header line: node id + "description", the
 collapse button, and an "edit" hint. An empty description shows a dim placeholder
@@ -42,6 +42,18 @@ card gets a second `TextInput` instance as its buffer. While editing:
 - Keys that act on the canvas (Delete, Ctrl+T, Ctrl+↑/↓, palette prefixes) are inert while
   the card is editing — keyboard focus is the card's.
 - Save = one `History` snapshot + `save()`, only if the text changed.
+
+### 4a. Text undo inside the editor, in TextInput
+`TextInput` gains a bounded undo/redo stack of `{text, caret, anchor}` snapshots, pushed
+before every mutation (typing, paste, cut, the deletes). Consecutive typed characters
+coalesce into one step, broken by a pause (~1 s), whitespace, a caret move, or any other
+kind of edit — so Ctrl+Z steps back a word or a burst, not a character. Redo is cleared by
+a new edit. `clear()` / `setText()` reset the stack. Pure and unit-tested.
+
+While the card is editing, Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y go to the card's `TextInput`.
+Everywhere else they keep their current meaning (app-level undo of the tree), including
+in the input bar — giving the bar text undo too is possible later, but changes what
+Ctrl+Z means while typing a task, so it is not part of this change.
 
 ### 5. Marker: a small "lines" glyph in the node's top band
 Three short horizontal strokes, drawn left of the date chip, in the id-badge colour. Drawn
@@ -67,8 +79,7 @@ app on the new binary before any `tt` write — same as v5.
 ## Risks / trade-offs
 
 - **Second text editor.** Multi-line caret/selection logic is new code; keeping the row
-  mapping pure and tested limits the risk. Undo inside the editor is not provided (Esc
-  cancels the whole edit; app-level undo reverts a saved one).
+  mapping pure and tested limits the risk.
 - **External edits while editing.** The app already defers reload during an in-bar edit;
   the same deferral applies while the card is editing, and the app wins a same-row
   conflict on save, as today.

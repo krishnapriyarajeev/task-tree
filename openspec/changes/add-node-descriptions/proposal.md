@@ -11,12 +11,14 @@ able to see and fix what they wrote.
 
 - **A `description` on every task**: free, multi-line plain text, empty by default. No
   structure is imposed — what goes in it is the writer's (usually an agent's) business.
-- **Description card** in the overlay's free bottom-right corner, showing the selected
-  node's description. It sits clear of the DONE panel when that is revealed.
+- **Description card** in the overlay's free bottom-left corner, showing the selected
+  node's description (the right edge belongs to the DONE panel).
 - **Ctrl+D** (or the card's button) collapses the card to a slim header and back; the
   choice is remembered across restarts.
 - **Ctrl+E** (or clicking the card's body) edits the description in place, in the card:
-  Enter = newline, Ctrl+Enter or clicking away = save, Esc = cancel. Undoable.
+  Enter = newline, Ctrl+Enter or clicking away = save, Esc = cancel. While editing,
+  Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y) undo and redo the text itself, in word-sized steps; a
+  saved edit is one app-level undo step.
 - **Marker** on nodes that have a description, in the node's top band, so notes are
   visible without selecting every node.
 - **Search**: `?` find, `:` / `>` text queries and `tt find` also match descriptions,
