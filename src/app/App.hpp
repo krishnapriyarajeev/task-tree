@@ -191,6 +191,10 @@ private:
     TreeId currentTree_ = kDefaultTree;
     struct View { Vec2 pan; float zoom = 1.f; };
     std::unordered_map<TreeId, View> views_;
+    // Set by a tree switch; the next frame (after relayout) recentres the camera if not one
+    // of the tree's nodes is on screen. A remembered view can go stale — the tree changed
+    // under it, or the window/monitor did — and an empty canvas reads as "my tasks are gone".
+    bool verifyView_ = false;
     std::vector<TreeId> treeCands_;    // ranked trees for the '@' / '>@' commands
     bool treeMenuOpen_ = false;        // the top-left picker's list is showing
     TreePickerLayout picker_;          // last frame's picker geometry (for hit tests)

@@ -967,6 +967,18 @@ void App::drawScene(int winW, int winH, float dpr) {
         anchorNode_ = 0;
     }
 
+    // After a tree switch: a remembered camera that shows none of the tree's nodes is stale.
+    if (verifyView_) {
+        verifyView_ = false;
+        const bool anyVisible = std::any_of(rects_.begin(), rects_.end(),
+                                            [this](const auto& kv) { return nodeOnScreen(kv.first); });
+        if (!anyVisible && !rects_.empty()) {
+            cancelPanAnim();
+            pan_ = {0.f, 0.f};
+            zoom_ = 1.f;
+        }
+    }
+
     // Debounced palette pan: once typing settles, bring the command's target into view.
     if (searchPanDue_ != 0.0 && glfwGetTime() >= searchPanDue_) {
         searchPanDue_ = 0.0;
@@ -1271,6 +1283,7 @@ void App::switchTree(TreeId tree) {
     const auto it = views_.find(tree);
     pan_ = (it != views_.end()) ? it->second.pan : Vec2{0.f, 0.f};
     zoom_ = (it != views_.end()) ? it->second.zoom : 1.f;
+    verifyView_ = true;
     // Everything that pointed at a node on the old canvas is now meaningless.
     cancelPanAnim();
     drag_.cancel();
