@@ -1,0 +1,71 @@
+#!/bin/bash
+# TaskTree app lifecycle — usage: tasktree {start|stop|restart|status|logs}
+#
+# The repo-tracked launcher (supersedes the private ~/.init-scripts/tasktree.sh). It
+# manages the overlay *process*; to read or change the task *store*, use the `tt` CLI.
+# scripts/install.sh symlinks this onto your PATH and pins TASKTREE_BIN to the build it
+# installed. Override the binary with TASKTREE_BIN=/path/to/tasktree.
+set -u
+
+# Resolve the repo this script ships in, even when invoked through a PATH symlink.
+SELF="$(readlink -f "${BASH_SOURCE[0]:-$0}")"
+REPO="$(cd "$(dirname "$SELF")/.." && pwd)"
+
+# Private config (Groq key + optional TASKTREE_BIN), seeded by install.sh. Source it FIRST,
+# so a TASKTREE_BIN pinned in there is honoured below and the key reaches start(). Never
+# hardcoded here, so this script is safe to commit.
+CFG="${XDG_CONFIG_HOME:-$HOME/.config}/tasktree/env"
+[[ -f "$CFG" ]] && . "$CFG"
+
+# The overlay binary: an explicit TASKTREE_BIN (env or config) wins; otherwise prefer the
+# prod build, then the dev build, in this repo.
+BIN="${TASKTREE_BIN:-}"
+if [[ -z "$BIN" ]]; then
+  if   [[ -x "$REPO/build-prod/tasktree" ]]; then BIN="$REPO/build-prod/tasktree"
+  elif [[ -x "$REPO/build/tasktree" ]];      then BIN="$REPO/build/tasktree"
+  else BIN="$REPO/build-prod/tasktree"   # doesn't exist yet — start() reports the path
+  fi
+fi
+
+PID_FILE="/tmp/tasktree.pid"
+LOG_FILE="/tmp/tasktree.log"
+
+start() {
+  if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    echo "tasktree already running (pid $(cat "$PID_FILE"))"; return 0
+  fi
+  if [[ ! -x "$BIN" ]]; then
+    echo "tasktree: binary not found at $BIN — build it first (cmake --build build)" >&2
+    return 1
+  fi
+  GROQ_API_KEY="${GROQ_API_KEY:-}" nohup "$BIN" >"$LOG_FILE" 2>&1 &
+  echo $! >"$PID_FILE"; disown 2>/dev/null
+  echo "tasktree started (pid $(cat "$PID_FILE"))"
+}
+
+stop() {
+  if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    kill "$(cat "$PID_FILE")" 2>/dev/null; rm -f "$PID_FILE"; echo "tasktree stopped"
+  elif pkill -f "$BIN" 2>/dev/null; then          # fall back to matching the binary path
+    rm -f "$PID_FILE"; echo "tasktree stopped"
+  else
+    echo "tasktree not running"
+  fi
+}
+
+status() {
+  if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    echo "tasktree running (pid $(cat "$PID_FILE"))"
+  else
+    echo "tasktree not running"
+  fi
+}
+
+case "${1:-status}" in
+  start)   start ;;
+  stop)    stop ;;
+  restart) stop; sleep 0.3; start ;;
+  status)  status ;;
+  logs)    tail -n "${2:-40}" -f "$LOG_FILE" ;;
+  *) echo "usage: tasktree {start|stop|restart|status|logs}" >&2; exit 1 ;;
+esac
