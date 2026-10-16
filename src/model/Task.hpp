@@ -42,6 +42,11 @@ struct Task {
     // doneAt: the timestamp IS the flag (0 = not a workspace, else when it was made one).
     // Its name is just its text. The task does not move: main always shows everything.
     std::int64_t workspaceAt = 0;
+    // Free multi-line plain text (UTF-8, \n-separated), empty = none. No structure is
+    // imposed: what goes in it is the writer's business — usually an agent recording the
+    // ticket, branch or PR that makes the task actionable. Last, so positional
+    // initialisers of the older fields keep compiling.
+    std::string description;
 
     bool isDone() const { return doneAt != 0; }
     bool isWorkspace() const { return workspaceAt != 0; }

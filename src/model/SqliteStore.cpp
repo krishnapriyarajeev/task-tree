@@ -3,8 +3,8 @@
 // Schema (one row per task; `roots` / `doneRoots` / `children` are NOT stored as lists):
 //
 //   tasks(id, parent, ord, text, collapsed, status, created_at, done_at, deleted_at,
-//         workspace_at)
-//   meta(key, value)          -- next_id, current_view
+//         workspace_at, description)
+//   meta(key, value)          -- next_id, current_view, desc_collapsed
 //
 // TWO TIMESTAMPS, NO BOOLEANS. `done_at` and `deleted_at` each carry both the state and
 // its date, so the pair can never disagree the way a flag beside a timestamp can:
@@ -53,8 +53,9 @@ namespace {
 namespace fs = std::filesystem;
 
 // 1 = original, 2 = + deleted_at, 3 = `done` boolean folded into done_at, 4 = + trees,
-// 5 = trees replaced by workspace_at (a workspace is a marked task, not a partition)
-constexpr int kSchemaVersion = 5;
+// 5 = trees replaced by workspace_at (a workspace is a marked task, not a partition),
+// 6 = + description
+constexpr int kSchemaVersion = 6;
 
 const char* const kSchema =
     "CREATE TABLE IF NOT EXISTS tasks("
@@ -67,7 +68,8 @@ const char* const kSchema =
     "  created_at INTEGER NOT NULL DEFAULT 0,"
     "  done_at    INTEGER NOT NULL DEFAULT 0,"    // 0 = not done; -1 = done, date unknown
     "  deleted_at INTEGER NOT NULL DEFAULT 0,"    // 0 = live; epoch ms = when it was deleted
-    "  workspace_at INTEGER NOT NULL DEFAULT 0);"  // 0 = plain task; epoch ms = made a workspace
+    "  workspace_at INTEGER NOT NULL DEFAULT 0,"  // 0 = plain task; epoch ms = made a workspace
+    "  description TEXT   NOT NULL DEFAULT '');"   // free multi-line text; '' = none
     "CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent, ord);"
     "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value NOT NULL);";
 
@@ -234,6 +236,9 @@ bool upgradeSteps(const Db& db, int from) {
                 !db.exec("DELETE FROM meta WHERE key='current_tree'"))
                 return false;
         }
+        if (from < 6 &&
+            !db.exec("ALTER TABLE tasks ADD COLUMN description TEXT NOT NULL DEFAULT ''"))
+            return false;
     }
     return db.exec(("PRAGMA user_version=" + std::to_string(kSchemaVersion)).c_str());
 }
@@ -278,7 +283,7 @@ int ordOf(const std::unordered_map<TaskId, int>& ord, TaskId id) {
 bool sameRow(const Task& a, const Task& b) {
     return a.parent == b.parent && a.workspaceAt == b.workspaceAt && a.text == b.text &&
            a.collapsed == b.collapsed && a.status == b.status &&
-           a.createdAt == b.createdAt && a.doneAt == b.doneAt;
+           a.createdAt == b.createdAt && a.doneAt == b.doneAt && a.description == b.description;
 }
 
 // The read itself, given an open connection. Shared by loadDb (fresh connection per
@@ -294,7 +299,7 @@ bool loadFromDb(const Db& db, Forest& f) {
     {
         Stmt q;
         if (!q.prepare(db.h,
-                       "SELECT id,parent,text,collapsed,status,created_at,done_at,workspace_at"
+                       "SELECT id,parent,text,collapsed,status,created_at,done_at,workspace_at,description"
                        " FROM tasks WHERE deleted_at=0 ORDER BY parent, ord, id"))
             return false;
         for (;;) {
@@ -313,6 +318,8 @@ bool loadFromDb(const Db& db, Forest& f) {
             t.createdAt = sqlite3_column_int64(q.h, 5);
             t.doneAt = sqlite3_column_int64(q.h, 6);
             t.workspaceAt = sqlite3_column_int64(q.h, 7);
+            if (const unsigned char* s = sqlite3_column_text(q.h, 8))
+                t.description = reinterpret_cast<const char*>(s);
 
             rowOrder.push_back(t.id);
             f.nextId = std::max<TaskId>(f.nextId, t.id + 1);
@@ -379,12 +386,14 @@ bool saveToDb(const Db& db, const Forest& f, const Forest* baseline) {
         // so writing one un-deletes its row (this is what makes undo-of-a-delete work).
         ok = up.prepare(db.h,
                         "INSERT INTO tasks(id,parent,ord,text,collapsed,status,"
-                        "created_at,done_at,deleted_at,workspace_at) VALUES(?,?,?,?,?,?,?,?,0,?)"
+                        "created_at,done_at,deleted_at,workspace_at,description)"
+                        " VALUES(?,?,?,?,?,?,?,?,0,?,?)"
                         " ON CONFLICT(id) DO UPDATE SET parent=excluded.parent,"
                         " ord=excluded.ord, text=excluded.text,"
                         " collapsed=excluded.collapsed, status=excluded.status,"
                         " created_at=excluded.created_at, done_at=excluded.done_at,"
-                        " deleted_at=0, workspace_at=excluded.workspace_at");
+                        " deleted_at=0, workspace_at=excluded.workspace_at,"
+                        " description=excluded.description");
         for (TaskId id : upserts) {
             if (!ok) break;
             const Task* t = f.get(id);
@@ -400,6 +409,7 @@ bool saveToDb(const Db& db, const Forest& f, const Forest* baseline) {
             sqlite3_bind_int64(up.h, 7, t->createdAt);
             sqlite3_bind_int64(up.h, 8, t->doneAt);
             sqlite3_bind_int64(up.h, 9, t->workspaceAt);
+            sqlite3_bind_text(up.h, 10, t->description.c_str(), -1, SQLITE_STATIC);
             ok = sqlite3_step(up.h) == SQLITE_DONE;
         }
     }
@@ -529,6 +539,25 @@ bool Session::setCurrentView(TaskId view) {
                                 " ON CONFLICT(key) DO UPDATE SET value=excluded.value"))
         return false;
     sqlite3_bind_int64(q.h, 1, static_cast<sqlite3_int64>(view));
+    return sqlite3_step(q.h) == SQLITE_DONE;
+}
+
+bool Session::descCollapsed() {
+    if (!isDbPath(path_) || !impl_->ensureOpen(path_, false)) return false;
+    Stmt q;
+    if (!q.prepare(impl_->db.h, "SELECT value FROM meta WHERE key='desc_collapsed'") ||
+        sqlite3_step(q.h) != SQLITE_ROW)
+        return false;
+    return sqlite3_column_int(q.h, 0) != 0;
+}
+
+bool Session::setDescCollapsed(bool collapsed) {
+    if (!isDbPath(path_) || !impl_->ensureOpen(path_, true)) return false;
+    Stmt q;
+    if (!q.prepare(impl_->db.h, "INSERT INTO meta(key,value) VALUES('desc_collapsed',?)"
+                                " ON CONFLICT(key) DO UPDATE SET value=excluded.value"))
+        return false;
+    sqlite3_bind_int(q.h, 1, collapsed ? 1 : 0);
     return sqlite3_step(q.h) == SQLITE_DONE;
 }
 

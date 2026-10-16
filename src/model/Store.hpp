@@ -94,6 +94,12 @@ public:
     TaskId currentView();
     bool   setCurrentView(TaskId view);
 
+    // Whether the description card is collapsed to its header (meta `desc_collapsed`).
+    // View state like currentView: outside the Forest, so undo never toggles it. False
+    // when unset or for a JSON store.
+    bool descCollapsed();
+    bool setDescCollapsed(bool collapsed);
+
 private:
     std::string path_;
     struct Impl;

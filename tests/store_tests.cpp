@@ -526,7 +526,7 @@ int main() {
         }
         Forest g;
         CHECK(store::loadDb(g, db), "a v4 DB loads");
-        CHECK(rawUserVersion(db) == 5, "user_version bumped to 5");
+        CHECK(rawUserVersion(db) == store::supportedDbSchemaVersion(), "user_version bumped to current");
         CHECK(g.size() == 7, "every row kept, plus one wrapper for the multi-root tree");
         CHECK(g.get(3) && g.get(3)->isWorkspace() && g.get(3)->parent == kNoParent,
               "a one-root tree's root becomes the workspace, in place");
@@ -559,6 +559,93 @@ int main() {
         CHECK(s2.currentView() == w, "survives a new connection");
         Forest back;
         CHECK(s2.load(back) && equivalent(f, back), "workspace_at round-trips");
+        removeDb(db);
+    }
+
+    // ---- Descriptions: multi-line, byte-exact, in both stores -------------------
+    {
+        const std::string desc = "Linear: TT-42\nrepo: task-tree  branch: v3\n\n  indented — é\n";
+        Forest f;
+        const TaskId a = f.addTask("with notes");
+        const TaskId b = f.addTask("without", a);
+        f.get(a)->description = desc;
+
+        Forest probe = f;
+        probe.get(a)->description = "other";
+        CHECK(!equivalent(f, probe), "equivalent() compares descriptions");
+
+        const std::string db = tmpFile("desc.db").string();
+        removeDb(db);
+        CHECK(store::saveDb(f, db), "save a description to SQLite");
+        Forest g;
+        CHECK(store::loadDb(g, db) && equivalent(f, g), "SQLite round trip is exact");
+        CHECK(g.get(a)->description == desc, "newlines and UTF-8 survive");
+        CHECK(g.get(b)->description.empty(), "default is empty");
+
+        // An incremental save of ONLY a description edit must write it.
+        Forest base = g;
+        g.get(b)->description = "added later";
+        CHECK(store::saveDb(g, db, &base), "incremental save of a description edit");
+        Forest h;
+        CHECK(store::loadDb(h, db) && h.get(b)->description == "added later",
+              "the description-only edit landed");
+        removeDb(db);
+
+        const std::string js = tmpFile("desc.json").string();
+        CHECK(store::saveJson(f, js), "save a description to JSON");
+        Forest k;
+        CHECK(store::loadJson(k, js) && equivalent(f, k), "JSON round trip is exact");
+        fs::remove(js);
+    }
+
+    // ---- Schema upgrade 5 -> 6: description column, nothing else moves -----------
+    {
+        const std::string db = tmpFile("schema_v5.db").string();
+        removeDb(db);
+        {
+            sqlite3* h = nullptr;
+            CHECK(sqlite3_open(db.c_str(), &h) == SQLITE_OK, "create a v5 DB");
+            const char* v5 =
+                "CREATE TABLE tasks(id INTEGER PRIMARY KEY, parent INTEGER NOT NULL DEFAULT 0,"
+                " ord INTEGER NOT NULL DEFAULT 0, text TEXT NOT NULL DEFAULT '',"
+                " collapsed INTEGER NOT NULL DEFAULT 0, status INTEGER NOT NULL DEFAULT 0,"
+                " created_at INTEGER NOT NULL DEFAULT 0, done_at INTEGER NOT NULL DEFAULT 0,"
+                " deleted_at INTEGER NOT NULL DEFAULT 0, workspace_at INTEGER NOT NULL DEFAULT 0);"
+                "CREATE TABLE meta(key TEXT PRIMARY KEY, value NOT NULL);"
+                "INSERT INTO tasks(id,parent,ord,text,status,done_at,workspace_at) VALUES"
+                "  (1,0,0,'root',2,0,77),(2,1,0,'child',0,1700000000000,0);"
+                "INSERT INTO meta VALUES('next_id',9),('current_view',1);"
+                "PRAGMA user_version=5;";
+            CHECK(sqlite3_exec(h, v5, nullptr, nullptr, nullptr) == SQLITE_OK, "seed v5 rows");
+            sqlite3_close(h);
+        }
+        Forest g;
+        CHECK(store::loadDb(g, db), "a v5 DB loads");
+        CHECK(rawUserVersion(db) == 6, "user_version bumped to 6");
+        CHECK(g.size() == 2 && g.nextId == 9, "same rows, same next_id");
+        CHECK(g.get(1)->description.empty() && g.get(2)->description.empty(),
+              "every task starts with an empty description");
+        CHECK(g.get(1)->status == 2 && g.get(1)->workspaceAt == 77 &&
+              g.get(2)->doneAt == 1700000000000 && g.get(2)->parent == 1,
+              "every other field untouched");
+        store::Session s(db);
+        CHECK(s.currentView() == 1, "meta untouched");
+        removeDb(db);
+    }
+
+    // ---- desc_collapsed lives in meta, outside the Forest -------------------------
+    {
+        const std::string db = tmpFile("desc_collapsed.db").string();
+        removeDb(db);
+        Forest f;
+        f.addTask("x");
+        store::Session s(db);
+        CHECK(s.save(f), "create the store");
+        CHECK(!s.descCollapsed(), "unset -> expanded");
+        CHECK(s.setDescCollapsed(true) && s.descCollapsed(), "set + read back");
+        store::Session s2(db);
+        CHECK(s2.descCollapsed(), "survives a new connection");
+        CHECK(s2.setDescCollapsed(false) && !s2.descCollapsed(), "and clears");
         removeDb(db);
     }
 

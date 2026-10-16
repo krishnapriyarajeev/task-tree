@@ -1,8 +1,8 @@
 ## 1. Model + store
-- [ ] 1.1 `Task::description`; `equivalent()` compares it
-- [ ] 1.2 SQLite schema v6 (column + upgrade step), load/upsert/`sameRow`; JSON store field
-- [ ] 1.3 `Session` meta accessors for `desc_collapsed`
-- [ ] 1.4 Tests: round trip (with newlines), v5 → v6 upgrade, incremental save of a description edit
+- [x] 1.1 `Task::description`; `equivalent()` compares it
+- [x] 1.2 SQLite schema v6 (column + upgrade step), load/upsert/`sameRow`; JSON store field
+- [x] 1.3 `Session` meta accessors for `desc_collapsed`
+- [x] 1.4 Tests: round trip (with newlines), v5 → v6 upgrade, incremental save of a description edit
 
 ## 2. Search
 - [ ] 2.1 `rankMatches`: description-only matches after text matches

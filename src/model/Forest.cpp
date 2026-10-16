@@ -175,7 +175,8 @@ bool equivalent(const Forest& a, const Forest& b) {
         if (ta.id != tb->id || ta.parent != tb->parent || ta.text != tb->text ||
             ta.collapsed != tb->collapsed || ta.status != tb->status ||
             ta.createdAt != tb->createdAt || ta.doneAt != tb->doneAt ||
-            ta.workspaceAt != tb->workspaceAt || ta.children != tb->children)
+            ta.workspaceAt != tb->workspaceAt || ta.description != tb->description ||
+            ta.children != tb->children)
             return false;
     }
     return true;

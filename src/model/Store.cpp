@@ -92,6 +92,7 @@ bool loadJson(Forest& f, const std::string& path) {
         if (t.id == 0) continue;              // 0 is "no parent"; never a usable id
         t.parent = idField(jt, "parent");
         t.text = strField(jt, "text");
+        t.description = strField(jt, "description");
         t.collapsed = boolField(jt, "collapsed");
         t.status = static_cast<int>(numField(jt, "status"));
         t.createdAt = numField(jt, "createdAt");
@@ -195,6 +196,7 @@ bool saveJson(const Forest& f, const std::string& path) {
             {"id", t.id},
             {"parent", t.parent},
             {"text", t.text},
+            {"description", t.description},
             {"collapsed", t.collapsed},
             {"status", t.status},
             {"createdAt", t.createdAt},
