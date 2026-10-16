@@ -2,9 +2,11 @@
 // model (src/ui/TextInput.cpp). Built by CMake as the `textinput_tests` CTest target.
 // Uses the real GLFW key constants (header-only) so the codes match the app exactly.
 #include "ui/TextInput.hpp"
+#include "ui/TextRows.hpp"
 
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include <GLFW/glfw3.h>
 
@@ -161,6 +163,141 @@ static void testUtf8Boundaries() {
     CHECK(t.selectedText() == "a\xC3\xA9\xE2\x80\xA6" "b", "word covers the multibyte run");
 }
 
+// A fake clock for the undo coalescing window (TextInput::setClock).
+static double g_now = 100.0;
+static TextInput clocked(const std::string& s = "") {
+    TextInput t;
+    t.setClock([] { return g_now; });
+    t.setText(s);
+    return t;
+}
+
+static void testUndoCoalescing() {
+    std::printf("[textinput] undo: typing coalesces into word-sized steps\n");
+    TextInput t = clocked();
+    CHECK(!t.canUndo(), "fresh field has nothing to undo");
+    type(t, "hello");
+    type(t, " world");
+    CHECK(t.text() == "hello world", "typed");
+    CHECK(t.undo() && t.text() == "hello", "undo removes the second word, keeps the first");
+    CHECK(t.caret() == 5, "caret restored with the text");
+    CHECK(t.redo() && t.text() == "hello world", "redo restores it");
+    CHECK(!t.redo(), "nothing further to redo");
+    CHECK(t.undo() && t.undo() && t.text().empty(), "second undo removes the first word");
+    CHECK(!t.undo(), "bottom of the stack");
+
+    // A pause breaks a burst even mid-word.
+    TextInput p = clocked();
+    type(p, "ab");
+    g_now += 1.5;
+    type(p, "cd");
+    CHECK(p.undo() && p.text() == "ab", "a pause starts a new step");
+
+    // A caret move breaks it too.
+    TextInput m = clocked();
+    type(m, "abc");
+    key(m, GLFW_KEY_LEFT);
+    type(m, "X");
+    CHECK(m.text() == "abXc", "typed after moving");
+    CHECK(m.undo() && m.text() == "abc", "the post-move typing is its own step");
+
+    // A new edit after an undo clears redo.
+    TextInput r = clocked();
+    type(r, "one two");
+    r.undo();
+    type(r, "!");
+    CHECK(!r.redo(), "a fresh edit forks history: redo cleared");
+}
+
+static void testUndoEditKinds() {
+    std::printf("[textinput] undo: every mutation is undoable, one step each\n");
+    TextInput t = clocked("hello world");
+    key(t, GLFW_KEY_BACKSPACE);
+    CHECK(t.text() == "hello worl", "backspace");
+    CHECK(t.undo() && t.text() == "hello world", "backspace undone");
+    key(t, GLFW_KEY_BACKSPACE, GLFW_MOD_CONTROL);
+    CHECK(t.undo() && t.text() == "hello world", "ctrl+backspace undone");
+    key(t, GLFW_KEY_HOME);
+    key(t, GLFW_KEY_DELETE);
+    CHECK(t.undo() && t.text() == "hello world", "delete undone");
+    t.selectAll();
+    t.insert("pasted");
+    CHECK(t.text() == "pasted" && t.undo() && t.text() == "hello world", "paste undone");
+    t.selectAll();
+    t.deleteSelection();
+    CHECK(t.undo() && t.text() == "hello world", "cut undone");
+    CHECK(t.hasSelection(), "selection restored with the text");
+    // Motion alone records nothing.
+    TextInput m = clocked("abc");
+    key(m, GLFW_KEY_LEFT);
+    key(m, GLFW_KEY_HOME);
+    CHECK(!m.canUndo(), "caret motion is not an edit");
+    // setText / clear reset the stack.
+    type(m, "x");
+    m.setText("new");
+    CHECK(!m.canUndo(), "setText resets history");
+}
+
+static void testMultiline() {
+    std::printf("[textinput] multi-line mode\n");
+    TextInput t = clocked("ab");
+    CHECK(t.onKey(GLFW_KEY_ENTER, 0) == TextInput::Action::Submit, "single-line: Enter submits");
+    t.setMultiline(true);
+    CHECK(t.onKey(GLFW_KEY_ENTER, 0) == TextInput::Action::None, "multi-line: Enter is an edit");
+    CHECK(t.text() == "ab\n", "Enter inserted a newline");
+    CHECK(t.onKey(GLFW_KEY_ENTER, GLFW_MOD_CONTROL) == TextInput::Action::Submit,
+          "Ctrl+Enter submits");
+    CHECK(t.onKey(GLFW_KEY_KP_ENTER, GLFW_MOD_CONTROL) == TextInput::Action::Submit,
+          "keypad Ctrl+Enter too");
+    t.insert("x\r\ny\tz");
+    CHECK(t.text() == "ab\nx\ny\tz", "paste keeps newlines (CRLF folded) and tabs");
+    TextInput s = clocked();
+    s.insert("x\ny");
+    CHECK(s.text() == "xy", "single-line paste still drops newlines");
+}
+
+static void testTextRows() {
+    std::printf("[textrows] multi-line row mapping\n");
+    // "ab\ncd ef\n" wrapped as: [ab] [cd] [ef] [] — a soft wrap's row ends before the space
+    // it broke at (end < next, as NanoVG reports it); the final empty row follows the
+    // trailing newline. Monospace 10px per byte for the advance function.
+    const std::string text = "ab\ncd ef\n";
+    std::vector<TextRow> rows = {{0, 2, 3}, {3, 5, 6}, {6, 8, 9}};
+    finishRows(rows, text);
+    CHECK(rows.size() == 4 && rows[3].start == 9 && rows[3].end == 9, "trailing empty row added");
+    std::vector<TextRow> none;
+    finishRows(none, "");
+    CHECK(none.size() == 1 && none[0].start == 0, "empty text has one empty row");
+
+    CHECK(rowOfByte(rows, 0) == 0, "start -> row 0");
+    CHECK(rowOfByte(rows, 2) == 0, "before the newline -> row 0");
+    CHECK(rowOfByte(rows, 3) == 1, "after the newline -> row 1");
+    CHECK(rowOfByte(rows, 6) == 2, "a soft-wrap boundary belongs to the next row");
+    CHECK(rowOfByte(rows, 8) == 2, "end of row 2");
+    CHECK(rowOfByte(rows, 9) == 3, "after the trailing newline -> the empty row");
+
+    const auto adv = [](int from, int to) { return 10.f * static_cast<float>(to - from); };
+    CHECK(byteAtX(text, rows[1], 0.f, adv) == 3, "x 0 -> row start");
+    CHECK(byteAtX(text, rows[1], 14.f, adv) == 4, "nearest glyph edge (rounds down)");
+    CHECK(byteAtX(text, rows[1], 16.f, adv) == 5, "nearest glyph edge (rounds up)");
+    CHECK(byteAtX(text, rows[1], 999.f, adv) == 5, "past the end -> row end");
+
+    CHECK(verticalMove(text, rows, 4, +1, 10.f, adv) == 7, "down keeps the column");
+    CHECK(verticalMove(text, rows, 7, -1, 10.f, adv) == 4, "up keeps the column");
+    CHECK(verticalMove(text, rows, 1, +1, 999.f, adv) == 5, "down clamps to a shorter row");
+    CHECK(verticalMove(text, rows, 1, -1, 10.f, adv) == 0, "up on the first row -> start");
+    CHECK(verticalMove(text, rows, 9, +1, 0.f, adv) == 9, "down on the last row -> end");
+    CHECK(rowHome(rows, 7) == 6 && rowEnd(rows, 7) == 8, "home/end of the caret's row");
+    CHECK(rowHome(rows, 2) == 0 && rowEnd(rows, 2) == 2, "home/end before a newline");
+
+    // UTF-8: never land inside a code point.
+    const std::string u = "é\né";   // 2 bytes, newline, 2 bytes
+    std::vector<TextRow> ur = {{0, 2, 3}, {3, 5, 5}};
+    finishRows(ur, u);
+    CHECK(byteAtX(u, ur[1], 9.f, adv) == 3 || byteAtX(u, ur[1], 9.f, adv) == 5,
+          "byteAtX stops on code-point boundaries");
+}
+
 int main() {
     testCaretMotion();
     testSelectAllAndCopyText();
@@ -170,6 +307,10 @@ int main() {
     testPasteReplacesSelection();
     testMouseCaretAndWord();
     testUtf8Boundaries();
+    testUndoCoalescing();
+    testUndoEditKinds();
+    testMultiline();
+    testTextRows();
 
     std::printf("\n%d checks, %d failed\n", g_checks, g_fail);
     return g_fail == 0 ? 0 : 1;

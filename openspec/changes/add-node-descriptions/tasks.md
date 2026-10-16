@@ -18,7 +18,7 @@
 - [ ] 4.3 Node marker for non-empty descriptions
 
 ## 5. Card editing
-- [ ] 5.1 Pure multi-line row mapping (byte ↔ row/x) + tests
+- [x] 5.1 Pure multi-line row mapping (byte ↔ row/x) + tests
 - [ ] 5.2 Second `TextInput` for the card; Ctrl+E / click to edit; Enter newline, Ctrl+Enter / click-away save, Esc cancel; caret, selection, Up/Down, click-to-place
 - [ ] 5.3 TextInput undo/redo stack with typing coalescing + tests; Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y routed to it while the card edits
 - [ ] 5.4 Focus rules: canvas/palette keys inert while editing; store reload deferred while editing

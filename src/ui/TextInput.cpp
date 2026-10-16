@@ -1,6 +1,7 @@
 #include "ui/TextInput.hpp"
 
 #include <algorithm>
+#include <chrono>
 
 #include <GLFW/glfw3.h>
 
@@ -82,11 +83,60 @@ std::pair<std::size_t, std::size_t> TextInput::wordBounds(std::size_t i) const {
     return {b, e};
 }
 
+double TextInput::now() const {
+    if (now_) return now_();
+    using namespace std::chrono;
+    return duration<double>(steady_clock::now().time_since_epoch()).count();
+}
+
+void TextInput::beginEdit(EditKind kind, bool whitespace) {
+    const double t = now();
+    // A typed character continues the burst when the last edit was typing, recent, left
+    // the caret exactly here, and this character isn't whitespace (a space starts the
+    // next word's step, so undo takes back " world" and leaves "hello").
+    const bool continues = kind == EditKind::Typing && lastKind_ == EditKind::Typing &&
+                           !whitespace && !hasSelection() && caret_ == lastCaret_ &&
+                           t - lastEditAt_ < kCoalesceGap;
+    if (!continues) {
+        undo_.push_back({text_, caret_, anchor_});
+        if (undo_.size() > kMaxUndo) undo_.erase(undo_.begin());
+    }
+    redo_.clear();
+    lastKind_ = kind;
+    lastEditAt_ = t;
+}
+
+bool TextInput::undo() {
+    if (undo_.empty()) return false;
+    redo_.push_back({text_, caret_, anchor_});
+    const Snap s = std::move(undo_.back());
+    undo_.pop_back();
+    text_ = s.text; caret_ = s.caret; anchor_ = s.anchor;
+    lastKind_ = EditKind::None;   // the next keystroke starts a fresh step
+    return true;
+}
+
+bool TextInput::redo() {
+    if (redo_.empty()) return false;
+    undo_.push_back({text_, caret_, anchor_});
+    const Snap s = std::move(redo_.back());
+    redo_.pop_back();
+    text_ = s.text; caret_ = s.caret; anchor_ = s.anchor;
+    lastKind_ = EditKind::None;
+    return true;
+}
+
 void TextInput::deleteSelection() {
     if (!hasSelection()) return;
+    beginEdit(EditKind::Other);
+    eraseSelection();
+}
+
+void TextInput::eraseSelection() {
     const std::size_t b = selBegin(), e = selEnd();
     text_.erase(b, e - b);
     caret_ = anchor_ = b;
+    lastCaret_ = caret_;
 }
 
 void TextInput::moveCaretTo(std::size_t byte, bool extend) {
@@ -101,24 +151,38 @@ void TextInput::selectWordAt(std::size_t byte) {
 }
 
 void TextInput::onChar(unsigned int codepoint) {
-    if (hasSelection()) deleteSelection();
+    beginEdit(EditKind::Typing, codepoint < 0x80 && isWs(static_cast<char>(codepoint)));
+    if (hasSelection()) eraseSelection();
     std::string enc;
     appendUtf8(enc, codepoint);
     text_.insert(caret_, enc);
     caret_ += enc.size();
     anchor_ = caret_;
+    lastCaret_ = caret_;
 }
 
 void TextInput::insert(const std::string& utf8) {
-    if (hasSelection()) deleteSelection();
-    // Drop control characters (e.g. newlines from a multi-line clipboard).
+    // Drop control characters (e.g. newlines from a multi-line clipboard) — except, in
+    // multi-line mode, newlines (CRLF / CR folded to LF) and tabs.
     std::string clean;
     clean.reserve(utf8.size());
-    for (char c : utf8)
-        if (static_cast<unsigned char>(c) >= 0x20 || (c & 0x80)) clean.push_back(c);
+    for (std::size_t i = 0; i < utf8.size(); ++i) {
+        const char c = utf8[i];
+        if (multiline_ && c == '\r') {
+            clean.push_back('\n');
+            if (i + 1 < utf8.size() && utf8[i + 1] == '\n') ++i;
+        } else if (static_cast<unsigned char>(c) >= 0x20 || (c & 0x80) ||
+                   (multiline_ && (c == '\n' || c == '\t'))) {
+            clean.push_back(c);
+        }
+    }
+    if (clean.empty() && !hasSelection()) return;   // nothing would change: no undo step
+    beginEdit(EditKind::Other);
+    if (hasSelection()) eraseSelection();
     text_.insert(caret_, clean);
     caret_ += clean.size();
     anchor_ = caret_;
+    lastCaret_ = caret_;
 }
 
 TextInput::Action TextInput::onKey(int key, int mods) {
@@ -127,12 +191,14 @@ TextInput::Action TextInput::onKey(int key, int mods) {
     switch (key) {
         case GLFW_KEY_ENTER:
         case GLFW_KEY_KP_ENTER:
+            if (multiline_ && !ctrl) { onChar('\n'); return Action::None; }
             return Action::Submit;
         case GLFW_KEY_ESCAPE:
             return Action::Cancel;
         case GLFW_KEY_BACKSPACE:
             if (hasSelection()) { deleteSelection(); break; }
             if (caret_ > 0) {
+                beginEdit(EditKind::Other);
                 const std::size_t from = ctrl ? prevWordStart(caret_) : prevBoundary(caret_);
                 text_.erase(from, caret_ - from);
                 caret_ = from;
@@ -142,6 +208,7 @@ TextInput::Action TextInput::onKey(int key, int mods) {
         case GLFW_KEY_DELETE:
             if (hasSelection()) { deleteSelection(); break; }
             if (caret_ < text_.size()) {
+                beginEdit(EditKind::Other);
                 const std::size_t to = ctrl ? nextWordEnd(caret_) : nextBoundary(caret_);
                 text_.erase(caret_, to - caret_);
             }
