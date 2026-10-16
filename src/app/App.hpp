@@ -254,6 +254,29 @@ private:
     double lastClickTime_ = 0.0;
     Vec2   lastClickPos_;
 
+    // Description card: the selected canvas node's description, bottom-left (see
+    // Renderer::layoutDescCard). Ctrl+D collapses it (persisted in the store's meta, so
+    // undo never toggles it); Ctrl+E or a click on its body edits in place, in its own
+    // multi-line TextInput — the input bar keeps its meaning. While the card edits,
+    // keyboard focus is the card's: canvas and palette keys are inert, Ctrl+Z steps the
+    // card's text history, and store reloads are deferred.
+    TextInput descInput_;
+    TaskId descEditing_ = 0;       // node whose description the card is editing (0 = none)
+    bool   descCollapsed_ = false;
+    float  descScroll_ = 0.f;
+    TaskId descScrollNode_ = 0;    // the node descScroll_ belongs to (reset on a change)
+    bool   descSelecting_ = false; // a left-drag in the card body is sweeping a selection
+    float  descColumnX_ = -1.f;    // Up/Down's remembered column (-1 = take the caret's)
+    DescCardLayout descCard_;      // last frame's geometry, for hit tests
+    TaskId descNode() const;       // the node the card shows (0 = no card)
+    DescCardLayout layoutDescFor(TaskId id) const;   // current geometry, current text
+    void   toggleDescCollapsed();
+    void   startDescEdit();
+    void   commitDescEdit();
+    void   cancelDescEdit();
+    void   handleDescKey(int key, int mods);
+    std::size_t descByteAt(const DescCardLayout& L, Vec2 p) const;
+
     std::mutex pendingMutex_;
     std::vector<std::pair<TaskId, ClassifyResult>> pending_;
 };

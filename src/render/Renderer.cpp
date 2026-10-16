@@ -123,7 +123,8 @@ void Renderer::drawEdge(const Rect& parent, const Rect& child, const Config& cfg
 
 void Renderer::drawNode(const Rect& r, const std::string& text, const Config& cfg,
                         bool highlight, float alphaMul, TaskId id, int status,
-                        const std::string& dateChip, bool workspace) const {
+                        const std::string& dateChip, bool workspace,
+                        bool hasDescription) const {
     // Fill + text colour depend on the status (right-click cycles it). A workspace is a
     // header, not work: it has its own colour and no status.
     if (workspace) status = 0;
@@ -193,6 +194,7 @@ void Renderer::drawNode(const Rect& r, const std::string& text, const Config& cf
     // badge's style (font face/size/align still set from it). Dropped, not squeezed,
     // when the band is too narrow — and empty when the date is unknown, because no
     // chip beats a guessed one.
+    float bandRight = r.x + r.w - 8.f;   // right end of the band still free
     if (!dateChip.empty()) {
         float db[4] = {0, 0, 0, 0};
         nvgTextBounds(vg_, 0, 0, dateChip.c_str(), end(dateChip), db);
@@ -205,6 +207,28 @@ void Renderer::drawNode(const Rect& r, const std::string& text, const Config& cf
             nvgFill(vg_);
             nvgFillColor(vg_, col(cfg.idBadgeText, alphaMul));
             nvgText(vg_, dx + 6.f, by + 3.f, dateChip.c_str(), end(dateChip));
+            bandRight = dx - 5.f;
+        }
+    }
+
+    // Description marker: three short "lines of text" strokes left of the date chip, in the
+    // badge colour — "this node has notes". Dropped, like the chip, when the band is full.
+    if (hasDescription) {
+        const float mw = 11.f;
+        const float mx = bandRight - mw;
+        if (mx >= bx + bw + 6.f) {
+            nvgBeginPath(vg_);
+            const float gap = bh / 4.f;
+            for (int i = 1; i <= 3; ++i) {
+                const float y = by + gap * i;
+                nvgMoveTo(vg_, mx, y);
+                nvgLineTo(vg_, mx + (i == 3 ? mw * 0.6f : mw), y);
+            }
+            nvgStrokeColor(vg_, col(cfg.idBadgeText, 0.75f * alphaMul));
+            nvgStrokeWidth(vg_, 1.5f);
+            nvgLineCap(vg_, NVG_ROUND);
+            nvgStroke(vg_);
+            nvgLineCap(vg_, NVG_BUTT);
         }
     }
 }
@@ -294,7 +318,7 @@ void Renderer::drawTree(const Forest& f, const std::unordered_map<TaskId, Rect>&
             const float a = alphaOf(id);
             if (a <= 0.01f) continue;
             drawNode(*r, t.text, cfg, hi, a, id, t.status, shortDate(t.createdAt, nowMs),
-                     t.isWorkspace());
+                     t.isWorkspace(), !t.description.empty());
             // A node with children gets a collapse/expand handle on its bottom edge.
             if (!t.children.empty() && a >= 0.99f)
                 drawCollapseHandle(*r, t.collapsed, t.collapsed ? countDescendants(f, id) : 0, cfg);
@@ -306,7 +330,7 @@ void Renderer::drawTree(const Forest& f, const std::unordered_map<TaskId, Rect>&
         const Task* t = f.get(dv.dragged);
         drawNode(dv.ghost, t ? t->text : std::string{}, cfg, false, 0.85f, dv.dragged,
                  t ? t->status : 0, t ? shortDate(t->createdAt, nowMs) : std::string{},
-                 t && t->isWorkspace());
+                 t && t->isWorkspace(), t && !t->description.empty());
     }
 
     // Fading path flash (root -> new node): highlight the path edges and node outlines.
@@ -655,6 +679,188 @@ std::size_t Renderer::inputByteAt(float screenW, float screenH, const std::strin
         i = j;
     }
     return static_cast<std::size_t>(re);
+}
+
+float Renderer::textAdvance(const std::string& text, int from, int to) const {
+    if (to <= from) return 0.f;
+    nvgFontFaceId(vg_, font_);
+    nvgFontSize(vg_, fontSize_);
+    return nvgTextBounds(vg_, 0, 0, text.c_str() + from, text.c_str() + to, nullptr);
+}
+
+DescCardLayout Renderer::layoutDescCard(float screenW, float screenH, const Rect& inputBox,
+                                        TaskId id, const std::string& text, bool collapsed,
+                                        bool editing, float scroll,
+                                        std::size_t caretByte) const {
+    DescCardLayout L;
+    L.visible = true;
+    L.collapsed = collapsed && !editing;   // editing always shows the body
+    L.editing = editing;
+    L.title = "#" + std::to_string(id) + "  description";
+
+    // Bottom-left, bottom edge level with the input bar's, in the free strip left of it
+    // (the right edge belongs to the DONE panel). A window too narrow for that strip puts
+    // the card above the bar instead, at the left.
+    const float margin = 16.f;
+    const float freeW = inputBox.x - 2 * margin;
+    const bool beside = freeW >= 220.f;
+    const float w = beside ? std::min(380.f, freeW) : std::min(380.f, screenW - 2 * margin);
+    const float bottom = beside ? inputBox.y + inputBox.h : inputBox.y - 10.f;
+    const float maxH = std::max(80.f, screenH * 0.45f);
+
+    nvgFontFaceId(vg_, font_);
+    nvgFontSize(vg_, fontSize_);
+    nvgTextMetrics(vg_, &L.asc, &L.desc, &L.lineH);
+
+    const float headerH = fontSize_ * 0.72f + 18.f;
+    const float pad = 10.f;
+    const float contentW = w - 2 * padX_;
+
+    if (!L.collapsed && !text.empty()) {
+        const char* s = text.c_str();
+        const char* e = s + text.size();
+        const char* p = s;
+        NVGtextRow tr[16];
+        int n = 0;
+        while (p < e && (n = nvgTextBreakLines(vg_, p, e, contentW, tr, 16)) > 0) {
+            for (int i = 0; i < n; ++i)
+                L.rows.push_back({(int)(tr[i].start - s), (int)(tr[i].end - s), (int)(tr[i].next - s)});
+            p = tr[n - 1].next;
+        }
+    }
+    finishRows(L.rows, text);
+
+    const float contentH = L.collapsed ? 0.f : static_cast<float>(L.rows.size()) * L.lineH;
+    const float bodyMax = maxH - headerH - 2 * pad;
+    const float bodyH = L.collapsed ? 0.f : std::min(contentH, bodyMax);
+    const float h = headerH + (L.collapsed ? 0.f : bodyH + 2 * pad);
+    const float x = margin, y = bottom - h;
+
+    L.card = {x, y, w, h};
+    L.header = {x, y, w, headerH};
+    const float bs = headerH - 10.f;
+    L.button = {x + w - 6.f - bs, y + 5.f, bs, bs};
+    if (!L.collapsed) L.body = {x, y + headerH, w, bodyH + 2 * pad};
+    L.tx = x + padX_;
+    L.textTop = y + headerH + pad;
+    L.maxScroll = std::max(0.f, contentH - bodyH);
+
+    // Keep the caret's row inside the visible body while editing.
+    if (editing && caretByte != std::string::npos && !L.collapsed) {
+        const int r = rowOfByte(L.rows, std::min(caretByte, text.size()));
+        const float top = r * L.lineH, bot = top + L.lineH;
+        if (top < scroll) scroll = top;
+        if (bot > scroll + bodyH) scroll = bot - bodyH;
+    }
+    L.scroll = std::max(0.f, std::min(scroll, L.maxScroll));
+    return L;
+}
+
+void Renderer::drawDescCard(const DescCardLayout& L, const std::string& text,
+                            std::size_t caretByte, std::size_t selBegin, std::size_t selEnd,
+                            bool caretOn, const Config& cfg) const {
+    if (!L.visible) return;
+    // Same chrome as the bar and the palette, so it reads as part of the HUD; the border
+    // goes selection-blue while editing, as the bar's does for an in-place node edit.
+    const Color editBorder{120 / 255.f, 175 / 255.f, 255 / 255.f, 1.f};
+    drawFieldChrome(L.card.x, L.card.y, L.card.w, L.card.h, cfg,
+                    L.editing ? editBorder : cfg.nodeBorder);
+
+    // Header: title on the left, key hint before the toggle, toggle at the right.
+    const float hintSize = fontSize_ * 0.72f;
+    const float hy = L.header.y + L.header.h * 0.5f;
+    nvgFontFaceId(vg_, font_);
+    nvgFontSize(vg_, hintSize);
+    nvgTextAlign(vg_, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+    nvgFillColor(vg_, col(cfg.nodeText, 0.6f));
+    nvgText(vg_, L.header.x + padX_, hy, L.title.c_str(), end(L.title));
+    const float titleW = nvgTextBounds(vg_, 0, 0, L.title.c_str(), end(L.title), nullptr);
+    const std::string hint = L.editing   ? "Ctrl+Enter save · Esc cancel"
+                             : L.collapsed ? "Ctrl+D show"
+                                           : "Ctrl+E edit · Ctrl+D hide";
+    const float hintW = nvgTextBounds(vg_, 0, 0, hint.c_str(), end(hint), nullptr);
+    const float hintRight = L.button.x - 8.f;
+    if (hintRight - hintW > L.header.x + padX_ + titleW + 12.f) {
+        nvgTextAlign(vg_, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+        nvgFillColor(vg_, col(cfg.nodeText, 0.38f));
+        nvgText(vg_, hintRight, hy, hint.c_str(), end(hint));
+    }
+    // Toggle: a chevron — down (expanded: "fold away") / up (collapsed: "open up").
+    {
+        const Rect& b = L.button;
+        const float cx = b.cx(), cy = b.cy(), s = b.w * 0.22f;
+        const float dir = L.collapsed ? -1.f : 1.f;
+        nvgBeginPath(vg_);
+        nvgMoveTo(vg_, cx - s, cy - dir * s * 0.5f);
+        nvgLineTo(vg_, cx, cy + dir * s * 0.5f);
+        nvgLineTo(vg_, cx + s, cy - dir * s * 0.5f);
+        nvgStrokeColor(vg_, col(cfg.nodeText, 0.65f));
+        nvgStrokeWidth(vg_, 1.6f);
+        nvgLineCap(vg_, NVG_ROUND);
+        nvgLineJoin(vg_, NVG_ROUND);
+        nvgStroke(vg_);
+        nvgLineCap(vg_, NVG_BUTT);
+        nvgLineJoin(vg_, NVG_MITER);
+    }
+    if (L.collapsed) {
+        nvgFontSize(vg_, fontSize_);
+        nvgTextAlign(vg_, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+        return;
+    }
+
+    // Body, clipped to the text area so scrolled rows never spill over the header.
+    nvgFontSize(vg_, fontSize_);
+    nvgTextAlign(vg_, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+    nvgSave(vg_);
+    const float clipTop = L.textTop, clipH = L.body.y + L.body.h - 10.f - L.textTop;
+    nvgIntersectScissor(vg_, L.body.x, clipTop, L.body.w, std::max(0.f, clipH));
+    const auto rowTop = [&](int i) { return L.textTop + i * L.lineH - L.scroll; };
+    const auto visible = [&](int i) {
+        const float t = rowTop(i);
+        return t + L.lineH >= clipTop && t <= clipTop + clipH;
+    };
+
+    if (text.empty()) {
+        nvgFillColor(vg_, col(cfg.nodeText, 0.4f));
+        const char* ph = L.editing ? "Write a description — Enter for a new line"
+                                   : "No description — Ctrl+E to add";
+        nvgText(vg_, L.tx, L.textTop, ph, nullptr);
+    } else {
+        selBegin = std::min(selBegin, text.size());
+        selEnd = std::min(selEnd, text.size());
+        if (L.editing && selEnd > selBegin) {
+            const Color selCol{120 / 255.f, 175 / 255.f, 255 / 255.f, 1.f};
+            for (int i = 0; i < (int)L.rows.size(); ++i) {
+                if (!visible(i)) continue;
+                const int rs = L.rows[i].start, re = L.rows[i].end;
+                const int a = std::max((int)selBegin, rs);
+                // A selected newline shows as a sliver past the row's end.
+                const bool nl = (int)selEnd > re && re < L.rows[i].next;
+                const int b = std::min((int)selEnd, re);
+                if (b < a || (b == a && !nl)) continue;
+                const float xa = textAdvance(text, rs, a);
+                const float xb = textAdvance(text, rs, b) + (nl ? fontSize_ * 0.3f : 0.f);
+                nvgBeginPath(vg_);
+                nvgRect(vg_, L.tx + xa, rowTop(i), xb - xa, L.lineH);
+                nvgFillColor(vg_, col(selCol, 0.30f));
+                nvgFill(vg_);
+            }
+        }
+        nvgFillColor(vg_, col(cfg.nodeText, 0.92f));
+        for (int i = 0; i < (int)L.rows.size(); ++i) {
+            if (!visible(i) || L.rows[i].end <= L.rows[i].start) continue;
+            nvgText(vg_, L.tx, rowTop(i), text.c_str() + L.rows[i].start,
+                    text.c_str() + L.rows[i].end);
+        }
+    }
+
+    if (L.editing && caretOn) {
+        const std::size_t cb = std::min(caretByte, text.size());
+        const int r = rowOfByte(L.rows, cb);
+        const float adv = textAdvance(text, L.rows[r].start, (int)cb);
+        drawCaret(L.tx + adv, rowTop(r) + (L.asc - L.desc) * 0.5f, cfg);
+    }
+    nvgRestore(vg_);
 }
 
 std::string Renderer::fitText(const std::string& s, float maxW) const {

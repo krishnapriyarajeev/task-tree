@@ -48,6 +48,8 @@ App::App(IPlatform& platform, Renderer& renderer, IClassifier& classifier,
       // "everything is new, nothing was deleted" and leak deleted rows.
       lastSaved_(forest) {
     view_ = session_.currentView();   // reopen the workspace the overlay last showed
+    descCollapsed_ = session_.descCollapsed();
+    descInput_.setMultiline(true);
     if (view_ != kMainView && !(forest_.exists(view_) && forest_.get(view_)->isWorkspace() &&
                                 !forest_.isInDoneSection(view_)))
         view_ = kMainView;
@@ -76,6 +78,8 @@ void App::showQuickAdd() {
 }
 
 void App::hide() {
+    if (descEditing_ != 0) commitDescEdit();   // hiding mid-edit keeps what was typed
+    descSelecting_ = false;
     mode_ = Mode::Hidden;
     input_.setFocused(false);
     input_.clear();
@@ -97,6 +101,12 @@ void App::hide() {
 
 void App::onChar(unsigned int codepoint) {
     if (mode_ == Mode::Hidden) return;
+    if (descEditing_ != 0) {               // the card has keyboard focus
+        descInput_.onChar(codepoint);
+        descColumnX_ = -1.f;
+        resetCaretBlink();
+        return;
+    }
     if (tryEnterMode(codepoint)) return;   // ? : > / on an empty bar: mode, not text
     input_.onChar(codepoint);
     resetCaretBlink();
@@ -111,6 +121,9 @@ void App::onKey(int key, int action, int mods) {
         updateReparentCue(action != GLFW_RELEASE);
 
     if (action == GLFW_RELEASE || mode_ == Mode::Hidden) return;
+
+    // While the description card edits, every key is the card's (see handleDescKey).
+    if (descEditing_ != 0) { handleDescKey(key, mods); return; }
 
     if (key == GLFW_KEY_ESCAPE && viewMenuOpen_) { viewMenuOpen_ = false; return; }
     if (key == GLFW_KEY_ESCAPE && drag_.active()) { drag_.cancel(); return; }
@@ -140,6 +153,12 @@ void App::onKey(int key, int action, int mods) {
     }
 
     if (mods & GLFW_MOD_CONTROL) {
+        // Description card: Ctrl+D folds it to its header and back; Ctrl+E edits it.
+        if (mode_ == Mode::Full && key == GLFW_KEY_D) { toggleDescCollapsed(); return; }
+        if (mode_ == Mode::Full && key == GLFW_KEY_E && editingNode_ == 0 && descNode() != 0) {
+            startDescEdit();
+            return;
+        }
         if (key == GLFW_KEY_V) {
             if (const char* clip = glfwGetClipboardString(platform_.window())) {
                 input_.insert(clip);
@@ -535,6 +554,46 @@ void App::onMouseButton(int button, int action, int mods) {
     if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS && handleViewPickerClick())
         return;
 
+    // Description card. A drag that began in its body keeps selecting until release.
+    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_RELEASE && descSelecting_) {
+        descSelecting_ = false;
+        return;
+    }
+    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS && descCard_.visible &&
+        descCard_.card.contains(mouse_.x, mouse_.y)) {
+        if (descCard_.button.contains(mouse_.x, mouse_.y)) {
+            if (descEditing_ == 0) toggleDescCollapsed();
+            return;
+        }
+        if (descCard_.collapsed) { toggleDescCollapsed(); return; }   // the header opens it
+        if (!descCard_.body.contains(mouse_.x, mouse_.y)) return;      // the rest of the header
+        if (descEditing_ == 0) startDescEdit();
+        if (descEditing_ == 0) return;
+        const DescCardLayout L = layoutDescFor(descEditing_);
+        const std::size_t byte = descByteAt(L, mouse_);
+        const double t = glfwGetTime();
+        const bool dbl = (t - lastClickTime_ < 0.40) &&
+                         std::fabs(mouse_.x - lastClickPos_.x) < 8.f &&
+                         std::fabs(mouse_.y - lastClickPos_.y) < 8.f;
+        lastClickTime_ = dbl ? 0.0 : t;
+        lastClickPos_ = mouse_;
+        if (dbl) {
+            descInput_.selectWordAt(byte);
+        } else {
+            descInput_.moveCaretTo(byte, (mods & GLFW_MOD_SHIFT) != 0);
+            descSelecting_ = true;
+        }
+        descColumnX_ = -1.f;
+        resetCaretBlink();
+        return;
+    }
+    // Other buttons on the card are swallowed too — it sits over the canvas, and a
+    // right-click there must not cycle the status of a node hidden underneath.
+    if (action == GLFW_PRESS && descCard_.visible && descCard_.card.contains(mouse_.x, mouse_.y))
+        return;
+    // A press anywhere outside the card saves its edit; the click then proceeds normally.
+    if (descEditing_ != 0 && action == GLFW_PRESS) commitDescEdit();
+
     // Input-bar text selection (task 188). A left-drag that began in the bar keeps extending
     // the selection until the button is released, wherever the release lands.
     if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_RELEASE && textSelecting_) {
@@ -664,6 +723,11 @@ void App::onMouseButton(int button, int action, int mods) {
 
 void App::onCursorPos(double x, double y) {
     mouse_ = {static_cast<float>(x), static_cast<float>(y)};
+    if (descSelecting_ && descEditing_ != 0 && mode_ == Mode::Full) {
+        descInput_.moveCaretTo(descByteAt(layoutDescFor(descEditing_), mouse_), /*extend=*/true);
+        resetCaretBlink();
+        return;
+    }
     // Drag-select inside the input bar: extend the selection to the byte under the cursor.
     if (textSelecting_ && mode_ == Mode::Full) {
         const std::size_t byte = renderer_.inputByteAt(
@@ -701,6 +765,11 @@ void App::onCursorEnter(bool entered) {
 
 void App::onScroll(double dx, double dy) {
     if (mode_ != Mode::Full) return;
+    // Over the description card: scroll its text (clamped by the next layout).
+    if (descCard_.visible && descCard_.card.contains(mouse_.x, mouse_.y)) {
+        descScroll_ = std::max(0.f, descScroll_ - static_cast<float>(dy) * 48.f);
+        return;
+    }
     // Over the DONE panel: scroll its list.
     if (donePanel_.visible && pointInPanel(mouse_)) {
         scrollY_ -= static_cast<float>(dy) * 48.f;
@@ -1053,8 +1122,22 @@ void App::drawScene(int winW, int winH, float dpr) {
         lastInputStyle_ = style;
         const Rect box = renderer_.drawInput(winW, winH, barText, input_.caret(),
                                              input_.selBegin(), input_.selEnd(),
-                                             caretOn() && !menu, cfg_, style);
+                                             caretOn() && !menu && descEditing_ == 0, cfg_,
+                                             style);
         inputBox_ = box;
+
+        // Description card for the selected node (left of the bar).
+        const TaskId dn = descNode();
+        if (dn != descScrollNode_) { descScrollNode_ = dn; descScroll_ = 0.f; }
+        if (dn != 0) {
+            descCard_ = layoutDescFor(dn);
+            descScroll_ = descCard_.scroll;
+            const std::string& dt = descEditing_ ? descInput_.text() : forest_.get(dn)->description;
+            renderer_.drawDescCard(descCard_, dt, descInput_.caret(), descInput_.selBegin(),
+                                   descInput_.selEnd(), descEditing_ != 0 && caretOn(), cfg_);
+        } else {
+            descCard_ = DescCardLayout{};
+        }
         drawPaletteDropUp(box);
 
         // "Copied" pill above the node whose text was just copied (task 186). Anchored to the
@@ -1497,7 +1580,7 @@ void App::pollStore() {
     // Deferred, not skipped, while a drag or an in-bar node edit is underway: reloading
     // would yank the tree out from under the user's hands. Deferral must come BEFORE the
     // changedExternally() call — that check reports each change only once.
-    if (drag_.active() || editingNode_ != 0) return;
+    if (drag_.active() || editingNode_ != 0 || descEditing_ != 0) return;
     const double now = glfwGetTime();
     if (now - lastStorePoll_ < kStorePollInterval) return;
     lastStorePoll_ = now;
@@ -1520,6 +1603,7 @@ void App::reloadFromStore() {
     history_.clear();
     drag_.cancel();
     editingNode_ = 0;   // the poll defers while editing; belt and braces
+    descEditing_ = 0;
     focusNode_ = 0;
     anchorNode_ = 0;
     reparentTarget_ = 0;
@@ -1647,6 +1731,125 @@ void App::afterHistoryChange() {
     forceRelayout();
     updatePalette();   // candidates/previews may reference now-removed or restored nodes
     save();
+}
+
+// ---- description card --------------------------------------------------------
+
+TaskId App::descNode() const {
+    if (mode_ != Mode::Full) return 0;
+    if (descEditing_ != 0) return descEditing_;
+    if (selected_ == 0 || !forest_.exists(selected_) || forest_.isInDoneSection(selected_))
+        return 0;
+    return selected_;
+}
+
+DescCardLayout App::layoutDescFor(TaskId id) const {
+    const Task* t = forest_.get(id);
+    const bool editing = descEditing_ == id && id != 0;
+    const std::string empty;
+    const std::string& text = editing ? descInput_.text() : (t ? t->description : empty);
+    return renderer_.layoutDescCard(static_cast<float>(lastWinW_), static_cast<float>(lastWinH_),
+                                    inputBox_, id, text, descCollapsed_, editing, descScroll_,
+                                    editing ? descInput_.caret() : std::string::npos);
+}
+
+std::size_t App::descByteAt(const DescCardLayout& L, Vec2 p) const {
+    const std::string& text = descInput_.text();
+    if (L.rows.empty() || L.lineH <= 0.f) return 0;
+    int r = static_cast<int>(std::floor((p.y - L.textTop + L.scroll) / L.lineH));
+    r = std::max(0, std::min(r, static_cast<int>(L.rows.size()) - 1));
+    return byteAtX(text, L.rows[r], p.x - L.tx,
+                   [&](int a, int b) { return renderer_.textAdvance(text, a, b); });
+}
+
+void App::toggleDescCollapsed() {
+    descCollapsed_ = !descCollapsed_;
+    session_.setDescCollapsed(descCollapsed_);   // view state: meta, not the Forest
+}
+
+void App::startDescEdit() {
+    const TaskId id = descNode();
+    const Task* t = forest_.get(id);
+    if (!t) return;
+    if (editingNode_ != 0) commitEdit(trim(input_.text()));   // one editor at a time
+    descEditing_ = id;
+    descInput_.setText(t->description);   // caret at the end, fresh text history
+    descColumnX_ = -1.f;
+    resetCaretBlink();
+}
+
+void App::commitDescEdit() {
+    const TaskId id = descEditing_;
+    descEditing_ = 0;
+    descSelecting_ = false;
+    std::string text = descInput_.text();
+    descInput_.clear();
+    Task* t = forest_.get(id);
+    if (!t) return;
+    // Whitespace alone is no description; anything else is kept exactly as typed.
+    if (text.find_first_not_of(" \t\r\n") == std::string::npos) text.clear();
+    if (text == t->description) return;   // unchanged: no undo step, no write
+    history_.snapshot(forest_);           // the whole edit is ONE tree-level undo step
+    t->description = std::move(text);
+    updatePalette();                      // a pending text query may now match it
+    save();
+}
+
+void App::cancelDescEdit() {
+    descEditing_ = 0;
+    descSelecting_ = false;
+    descInput_.clear();
+}
+
+void App::handleDescKey(int key, int mods) {
+    const bool ctrl = (mods & GLFW_MOD_CONTROL) != 0;
+    const bool shift = (mods & GLFW_MOD_SHIFT) != 0;
+    GLFWwindow* win = platform_.window();
+    const bool vertical = key == GLFW_KEY_UP || key == GLFW_KEY_DOWN;
+    if (!vertical) descColumnX_ = -1.f;
+    resetCaretBlink();
+
+    if (key == GLFW_KEY_ESCAPE) { cancelDescEdit(); return; }
+    if (ctrl) {
+        // The card's own text history — the tree's undo stack is not touched.
+        if (key == GLFW_KEY_Z) { if (shift) descInput_.redo(); else descInput_.undo(); return; }
+        if (key == GLFW_KEY_Y) { descInput_.redo(); return; }
+        if (key == GLFW_KEY_A) { descInput_.selectAll(); return; }
+        if (key == GLFW_KEY_C || key == GLFW_KEY_X) {
+            if (descInput_.hasSelection()) {
+                glfwSetClipboardString(win, descInput_.selectedText().c_str());
+                if (key == GLFW_KEY_X) descInput_.deleteSelection();
+            }
+            return;
+        }
+        if (key == GLFW_KEY_V) {
+            if (const char* clip = glfwGetClipboardString(win)) descInput_.insert(clip);
+            return;
+        }
+    }
+
+    // Row-aware motion needs the wrapped layout of the text as it is now.
+    if (vertical || ((key == GLFW_KEY_HOME || key == GLFW_KEY_END) && !ctrl)) {
+        const DescCardLayout L = layoutDescFor(descEditing_);
+        const std::string& text = descInput_.text();
+        const auto adv = [&](int a, int b) { return renderer_.textAdvance(text, a, b); };
+        std::size_t to;
+        if (vertical) {
+            if (descColumnX_ < 0.f) {
+                const int r = rowOfByte(L.rows, descInput_.caret());
+                descColumnX_ = adv(L.rows[r].start, static_cast<int>(descInput_.caret()));
+            }
+            to = verticalMove(text, L.rows, descInput_.caret(), key == GLFW_KEY_DOWN ? 1 : -1,
+                              descColumnX_, adv);
+        } else {
+            to = key == GLFW_KEY_HOME ? rowHome(L.rows, descInput_.caret())
+                                      : rowEnd(L.rows, descInput_.caret());
+        }
+        descInput_.moveCaretTo(to, shift);
+        return;
+    }
+
+    if (descInput_.onKey(key, mods) == TextInput::Action::Submit) commitDescEdit();   // Ctrl+Enter
 }
 
 } // namespace tt

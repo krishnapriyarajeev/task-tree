@@ -11,6 +11,7 @@
 #include "app/Config.hpp"
 #include "layout/Geometry.hpp"
 #include "model/Task.hpp"
+#include "ui/TextRows.hpp"
 
 struct NVGcontext;
 
@@ -68,6 +69,24 @@ struct ViewPickerLayout {
     int hoveredRow = -1;               // row under the cursor (-1 = none)
     bool buttonHovered = false;
     std::string hint;                  // key legend on the card's footer line
+};
+
+// The description card (bottom-left, left of the input bar), laid out by
+// Renderer::layoutDescCard so drawing and App's hit tests share one geometry. Screen
+// coordinates. `rows` are the wrapped visual rows of the description (byte ranges, see
+// ui/TextRows.hpp); row i's top is textTop + i * lineH - scroll.
+struct DescCardLayout {
+    bool  visible = false;
+    bool  collapsed = false;   // header only
+    bool  editing = false;
+    Rect  card;                // the whole card
+    Rect  header;              // title line (always shown)
+    Rect  button;              // collapse / expand toggle, in the header
+    Rect  body;                // text area, clipped (empty when collapsed)
+    float tx = 0.f, textTop = 0.f, lineH = 0.f, asc = 0.f, desc = 0.f;
+    float scroll = 0.f, maxScroll = 0.f;   // scroll is clamped to [0, maxScroll]
+    std::vector<TextRow> rows;
+    std::string title;         // "#12 description"
 };
 
 // One visible row in the DONE panel's expandable, indented tree.
@@ -135,6 +154,20 @@ public:
                      int moreCount, const std::string& hint, const Color& tint,
                      const Config& cfg);
 
+    // Description card (see DescCardLayout). Layout only measures text, so App may call it
+    // between frames (hit tests); `scroll` comes back clamped. When `caretByte` is given
+    // and editing, the scroll is nudged to keep that row in view.
+    DescCardLayout layoutDescCard(float screenW, float screenH, const Rect& inputBox,
+                                  TaskId id, const std::string& text, bool collapsed,
+                                  bool editing, float scroll,
+                                  std::size_t caretByte = std::string::npos) const;
+    void drawDescCard(const DescCardLayout& L, const std::string& text, std::size_t caretByte,
+                      std::size_t selBegin, std::size_t selEnd, bool caretOn,
+                      const Config& cfg) const;
+    // Advance width of text[from, to) in the card's font — the advance function the
+    // ui/TextRows helpers take, so caret maths matches what is drawn.
+    float textAdvance(const std::string& text, int from, int to) const;
+
     // The workspace picker (see ViewPickerLayout): button always, list card when open.
     void drawViewPicker(const ViewPickerLayout& layout, const Config& cfg);
     // Height of the picker's rows / button, so App can lay it out before drawing.
@@ -157,7 +190,8 @@ public:
 private:
     void drawNode(const Rect& r, const std::string& text, const Config& cfg,
                   bool highlight, float alphaMul, TaskId id, int status,
-                  const std::string& dateChip, bool workspace = false) const;
+                  const std::string& dateChip, bool workspace = false,
+                  bool hasDescription = false) const;
     void drawEdge(const Rect& parent, const Rect& child, const Config& cfg,
                   float alphaMul = 1.f) const;
 
