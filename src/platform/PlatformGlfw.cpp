@@ -101,6 +101,7 @@ bool PlatformGlfw::startHotkeys() {
 }
 
 void PlatformGlfw::shutdown() {
+    tray_.stop();
     hotkeys_.stop();
     if (win_) { glfwDestroyWindow(win_); win_ = nullptr; }
     glfwTerminate();

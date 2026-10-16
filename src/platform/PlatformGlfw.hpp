@@ -11,6 +11,7 @@
 
 #include "platform/Hotkeys.hpp"
 #include "platform/IPlatform.hpp"
+#include "platform/Tray.hpp"
 
 struct GLFWwindow;
 
@@ -29,13 +30,25 @@ public:
     bool startHotkeys();
     const std::vector<std::string>& failedChords() const { return hotkeys_.failedChords(); }
 
+    // System-tray icon. Configure the click actions, then start it. Returns false
+    // if there's no tray host on the session bus (the app runs on regardless).
+    void registerTrayActivate(std::function<void()> cb) { tray_.setActivate(std::move(cb)); }
+    void setTrayMenu(std::vector<TrayItem> items) { tray_.setMenu(std::move(items)); }
+    bool startTray() {
+        tray_.setWake([this]() { wake(); });
+        return tray_.start();
+    }
+
     // IPlatform
     GLFWwindow* window() override { return win_; }
     void coverPrimaryMonitor() override;
     void moveToNextMonitor() override;
     void showOverlay() override;
     void hideOverlay() override;
-    void pumpPlatformEvents() override { hotkeys_.drain(); }
+    void pumpPlatformEvents() override {
+        hotkeys_.drain();
+        tray_.drain();
+    }
     void wake() override;
 
 private:
@@ -43,6 +56,7 @@ private:
 
     GLFWwindow* win_ = nullptr;
     Hotkeys     hotkeys_;
+    Tray        tray_;
     int         monitorIndex_ = 0;
 };
 
