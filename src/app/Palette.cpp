@@ -109,14 +109,15 @@ Command interpret(Mode mode, const std::string& arg) {
 }
 
 std::vector<TaskId> rankMatches(const Forest& f, const std::string& query, std::size_t limit,
-                                TaskId scope) {
+                                TaskId scope, bool descriptions) {
     std::vector<TaskId> out;
     const std::string q = lower(trim(query));
     if (q.empty()) return out;
 
     struct Hit {
+        bool inDesc;       // a description-only match: always after every text match
         std::size_t pos;   // where the query matched (0 = the text starts with it)
-        std::size_t len;   // node text length: a shorter text is the tighter match
+        std::size_t len;   // matched field's length: a shorter one is the tighter match
         TaskId id;
     };
     std::vector<Hit> hits;
@@ -124,11 +125,17 @@ std::vector<TaskId> rankMatches(const Forest& f, const std::string& query, std::
         if (f.isInDoneSection(id)) continue;
         if (scope != kMainView && !f.isDescendantOf(id, scope)) continue;
         const std::string lt = lower(t.text);
-        const std::size_t pos = lt.find(q);
-        if (pos == std::string::npos) continue;
-        hits.push_back({pos, lt.size(), id});
+        if (const std::size_t pos = lt.find(q); pos != std::string::npos) {
+            hits.push_back({false, pos, lt.size(), id});
+            continue;
+        }
+        if (!descriptions || t.description.empty()) continue;
+        const std::string ld = lower(t.description);
+        if (const std::size_t pos = ld.find(q); pos != std::string::npos)
+            hits.push_back({true, pos, ld.size(), id});
     }
     std::sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) {
+        if (a.inDesc != b.inDesc) return !a.inDesc;
         if (a.pos != b.pos) return a.pos < b.pos;
         if (a.len != b.len) return a.len < b.len;
         return a.id < b.id;

@@ -77,8 +77,13 @@ Command interpret(Mode mode, const std::string& arg);
 // tighter match), then smaller id so the order is stable across runs. `limit` 0 = all.
 // `scope` restricts the search to that node's subtree (the workspace being shown);
 // kMainView searches everything.
+// Descriptions are searched too: description-only matches follow every text match, ranked
+// the same way among themselves (position and length within the description). Pass
+// `descriptions = false` for text-only — the CLI resolves node NAMES that way, so a task
+// that merely mentions a name in its notes never makes the name ambiguous.
 std::vector<TaskId> rankMatches(const Forest& f, const std::string& query,
-                                std::size_t limit = 0, TaskId scope = kMainView);
+                                std::size_t limit = 0, TaskId scope = kMainView,
+                                bool descriptions = true);
 
 // Workspaces whose text contains `query` (case-insensitive), ranked like rankMatches, ties
 // in Forest::workspaces() order — which an empty query returns as is.

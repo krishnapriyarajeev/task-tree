@@ -511,6 +511,35 @@ int main() {
         CHECK(rankMatches(f, "zzz").empty(), "no false matches");
     }
 
+    { // descriptions are searched too, but every text hit outranks every description hit
+        using namespace tt::palette;
+        Forest f;
+        const TaskId noteA  = f.addTask("aaa");                 // description hit at 0
+        f.get(noteA)->description = "ticket TT-9";
+        const TaskId text   = f.addTask("fix the TICKET flow"); // text hit at 8
+        const TaskId noteB  = f.addTask("b");                   // description hit at 4
+        f.get(noteB)->description = "see ticket\nlater";
+        const TaskId both   = f.addTask("ticket");              // text hit wins, listed once
+        f.get(both)->description = "ticket";
+        const TaskId doneN  = f.addTask("d");
+        f.get(doneN)->description = "ticket";
+        f.markDone(doneN);
+        const TaskId ws     = f.addTask("ws");
+        const TaskId scoped = f.addTask("c", ws);
+        f.get(scoped)->description = "ticket";
+
+        const auto r = rankMatches(f, "ticket");
+        CHECK((r == std::vector<TaskId>{both, text, scoped, noteA, noteB}),
+              "text hits first (by rank), then description hits (by rank)");
+        CHECK(std::find(r.begin(), r.end(), doneN) == r.end(), "DONE stays excluded");
+        CHECK((rankMatches(f, "ticket", 0, ws) == std::vector<TaskId>{scoped}),
+              "scope applies to description hits");
+        CHECK((rankMatches(f, "ticket", 3) == std::vector<TaskId>{both, text, scoped}),
+              "limit cuts across the joined list");
+        CHECK((rankMatches(f, "ticket", 0, kMainView, false) == std::vector<TaskId>{both, text}),
+              "descriptions can be left out (CLI name resolution)");
+    }
+
     { // shortDate: the tiny chip date ("jul 27", year added only when it differs)
         { // workspace ranking + per-view node search
             using namespace tt::palette;

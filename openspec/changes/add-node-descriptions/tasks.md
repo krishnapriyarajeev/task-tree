@@ -5,8 +5,8 @@
 - [x] 1.4 Tests: round trip (with newlines), v5 → v6 upgrade, incremental save of a description edit
 
 ## 2. Search
-- [ ] 2.1 `rankMatches`: description-only matches after text matches
-- [ ] 2.2 Tests for the ordering and for scope still applying
+- [x] 2.1 `rankMatches`: description-only matches after text matches
+- [x] 2.2 Tests for the ordering and for scope still applying
 
 ## 3. CLI
 - [ ] 3.1 `tt desc <node> [text|-] [--append] [--clear]`; `description` in the JSON task shape; help text

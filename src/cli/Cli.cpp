@@ -134,7 +134,9 @@ bool allDigits(const std::string& s) {
 
 // Resolve a node spec to a live task id: a number is an id, anything else a text query
 // resolved with palette::rankMatches (so the CLI and the overlay agree on what a name
-// means). Ambiguity is an error listing the candidates, never a silent guess.
+// means). Ambiguity is an error listing the candidates, never a silent guess. Names match
+// task TEXT only: a description that mentions a name must not make it ambiguous, nor make
+// a destructive verb land on a task the user never named.
 Exit resolveNode(const Forest& f, const std::string& spec, TaskId& out, std::ostream& err) {
     if (allDigits(spec)) {
         TaskId id = 0;
@@ -146,7 +148,7 @@ Exit resolveNode(const Forest& f, const std::string& spec, TaskId& out, std::ost
         err << "no live task with id " << spec << "\n";
         return kNotFound;
     }
-    const std::vector<TaskId> matches = palette::rankMatches(f, spec);
+    const std::vector<TaskId> matches = palette::rankMatches(f, spec, 0, kMainView, false);
     if (matches.empty()) {
         err << "no live task matches \"" << spec << "\"\n";
         return kNotFound;
