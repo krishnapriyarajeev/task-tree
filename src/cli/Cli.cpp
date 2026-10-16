@@ -18,6 +18,8 @@
 #include <charconv>
 #include <chrono>
 #include <filesystem>
+#include <iostream>
+#include <iterator>
 #include <limits>
 #include <ostream>
 #include <string>
@@ -50,6 +52,8 @@ struct Args {
     std::string store;               // --store <path>, empty = default resolution
     std::string parent;              // --parent <spec> (add)
     bool hasParent = false;
+    bool append = false;             // --append (desc)
+    bool clear = false;              // --clear (desc)
 };
 
 // Parse global + known flags out of argv, leaving positionals in order. Returns false and
@@ -66,6 +70,8 @@ bool parseArgs(const std::vector<std::string>& argv, Args& a, std::ostream& err)
         };
         if (s == "--json") a.json = true;
         else if (s == "--store") { if (!needValue("--store", a.store)) return false; }
+        else if (s == "--append") a.append = true;
+        else if (s == "--clear") a.clear = true;
         else if (s == "--parent") { a.hasParent = true; if (!needValue("--parent", a.parent)) return false; }
         else if (s.size() > 2 && s[0] == '-' && s[1] == '-') { err << "unknown flag " << s << "\n"; return false; }
         else pos.push_back(s);
@@ -188,6 +194,7 @@ json taskFields(const Forest& f, const Task& t, int ord) {
         {"created_at", t.createdAt},
         {"done_at", t.doneAt},
         {"workspace_at", t.workspaceAt},
+        {"description", t.description},
     };
 }
 
@@ -239,6 +246,9 @@ void printHelp(std::ostream& out) {
         "  parent <child> <parent>        reparent a subtree (refuses cycles)\n"
         "  rm <node>                      soft-delete a subtree (recoverable; see `deleted`)\n"
         "  workspace <node>               toggle the node being a workspace (Ctrl+T)\n"
+        "  desc <node> [<text>|-] [--append] [--clear]\n"
+        "                                 print a task's description (no text), replace it,\n"
+        "                                 read it from stdin (-), add a line, or empty it\n"
         "\n"
         "A <node> is a numeric id or a text query (unique match required; ambiguity is an error).\n"
         "\n"
@@ -305,6 +315,14 @@ int cmdShow(const Args& a, const Forest& f, std::ostream& out, std::ostream& err
         out << "#" << t.id << " " << t.text << doneTag(t) << "\n";
         out << "  parent " << t.parent << "  ord " << ordOf(f, t)
             << "  created_at " << t.createdAt << "  done_at " << t.doneAt << "\n";
+        // The description, each line behind a gutter so it can't be mistaken for a child.
+        std::string d = t.description;
+        if (!d.empty() && d.back() == '\n') d.pop_back();   // a final newline ends a line
+        for (std::size_t b = 0; !t.description.empty() && b <= d.size();) {
+            const std::size_t e = std::min(d.find('\n', b), d.size());
+            out << "  | " << d.substr(b, e - b) << "\n";
+            b = e + 1;
+        }
         for (TaskId c : t.children) out << "  #" << c << " " << f.get(c)->text << doneTag(*f.get(c)) << "\n";
     }
     return kOk;
@@ -420,6 +438,46 @@ int cmdWorkspace(const Args& a, const std::string& path, Forest& baseline, std::
     return kOk;
 }
 
+int cmdDesc(const Args& a, const std::string& path, Forest& baseline, std::istream& in,
+            std::ostream& out, std::ostream& err) {
+    if (a.rest.empty()) { err << "desc needs a node\n"; return kUsage; }
+    const bool hasText = a.rest.size() >= 2;
+    if (a.clear && (hasText || a.append)) {
+        err << "--clear takes no text and no --append\n";
+        return kUsage;
+    }
+    Forest work = baseline;
+    TaskId id = 0;
+    if (const Exit e = resolveNode(work, a.rest[0], id, err); e != kOk) return e;
+    std::string& desc = work.get(id)->description;
+
+    if (!hasText && !a.clear) {
+        // Print it exactly: no decoration and no added newline, so `tt desc 5 > f` and
+        // `tt desc 5 - < f` round-trip byte for byte.
+        if (a.json) out << json{{"id", id}, {"description", desc}}.dump() << "\n";
+        else out << desc;
+        return kOk;
+    }
+    if (a.append && !hasText) { err << "--append needs text (or -)\n"; return kUsage; }
+
+    std::string text;
+    if (a.clear) {
+        text.clear();
+    } else if (a.rest[1] == "-") {
+        text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    } else {
+        text = a.rest[1];
+    }
+    if (a.append) {
+        // A new line, not a run-on — but no blank line if the text already ends in one.
+        if (!desc.empty() && desc.back() != '\n') desc += '\n';
+        desc += text;
+    } else {
+        desc = std::move(text);
+    }
+    return saveStore(work, path, baseline, err);
+}
+
 int cmdRm(const Args& a, const std::string& path, Forest& baseline, std::ostream& err) {
     if (a.rest.empty()) { err << "rm needs a node\n"; return kUsage; }
     Forest work = baseline;
@@ -434,6 +492,11 @@ int cmdRm(const Args& a, const std::string& path, Forest& baseline, std::ostream
 } // namespace
 
 int run(const std::vector<std::string>& argv, std::ostream& out, std::ostream& err) {
+    return run(argv, std::cin, out, err);
+}
+
+int run(const std::vector<std::string>& argv, std::istream& in, std::ostream& out,
+        std::ostream& err) {
     // --help / --version are answered before any store work, and even with no store present.
     for (const std::string& s : argv) {
         if (s == "--help" || s == "-h") { printHelp(out); return kOk; }
@@ -473,6 +536,7 @@ int run(const std::vector<std::string>& argv, std::ostream& out, std::ostream& e
     if (a.command == "rm")     return cmdRm(a, path, forest, err);
     if (a.command == "workspaces") return cmdWorkspaces(a, forest, out);
     if (a.command == "workspace")  return cmdWorkspace(a, path, forest, out, err);
+    if (a.command == "desc")       return cmdDesc(a, path, forest, in, out, err);
 
     err << "unknown command \"" << a.command << "\" (try --help)\n";
     return kUsage;

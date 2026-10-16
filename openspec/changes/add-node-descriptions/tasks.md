@@ -9,8 +9,8 @@
 - [x] 2.2 Tests for the ordering and for scope still applying
 
 ## 3. CLI
-- [ ] 3.1 `tt desc <node> [text|-] [--append] [--clear]`; `description` in the JSON task shape; help text
-- [ ] 3.2 Tests: set, stdin, append, clear, print exactness, JSON field
+- [x] 3.1 `tt desc <node> [text|-] [--append] [--clear]`; `description` in the JSON task shape; help text
+- [x] 3.2 Tests: set, stdin, append, clear, print exactness, JSON field
 
 ## 4. Card (read-only)
 - [ ] 4.1 Card layout (bottom-left, left of the input bar, max height + scroll) and drawing

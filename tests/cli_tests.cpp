@@ -43,6 +43,14 @@ static Res call(std::vector<std::string> args) {
     return {code, out.str(), err.str()};
 }
 
+// The same, feeding `in` as stdin (for `tt desc <node> -`).
+static Res callIn(std::vector<std::string> args, const std::string& in) {
+    std::istringstream is(in);
+    std::ostringstream out, err;
+    const int code = cli::run(args, is, out, err);
+    return {code, out.str(), err.str()};
+}
+
 // `tt add ... --store db`, returning the new id it printed on stdout.
 static TaskId add(const std::string& db, const std::string& text, TaskId parent = 0) {
     std::vector<std::string> a = {"add", text, "--store", db};
@@ -184,6 +192,60 @@ int main() {
         r = call({"workspace", std::to_string(a), "--store", db});
         CHECK(r.out.find("no longer") != std::string::npos, "toggle off");
         CHECK(call({"workspaces", "--store", db}).out.empty(), "none left");
+        removeDb(db);
+    }
+
+    { // desc: print, set, stdin, append, clear, JSON
+        std::printf("[cli] desc\n");
+        const std::string db = tmpFile("desc.db").string();
+        removeDb(db);
+        const TaskId a = add(db, "alpha");
+        const std::string id = std::to_string(a);
+        Res r = call({"desc", id, "--store", db});
+        CHECK(r.code == cli::kOk && r.out.empty(), "an empty description prints nothing");
+
+        CHECK(call({"desc", id, "line one", "--store", db}).code == cli::kOk, "set");
+        r = call({"desc", "alpha", "--store", db});
+        CHECK(r.out == "line one", "prints exactly, no added newline (by name too)");
+
+        CHECK(call({"desc", id, "line two", "--append", "--store", db}).code == cli::kOk, "append");
+        CHECK(call({"desc", id, "--store", db}).out == "line one\nline two",
+              "append adds a line");
+
+        r = callIn({"desc", id, "-", "--store", db}, "from\nstdin\n");
+        CHECK(r.code == cli::kOk, "set from stdin");
+        CHECK(call({"desc", id, "--store", db}).out == "from\nstdin\n", "stdin kept byte-exact");
+        callIn({"desc", id, "-", "--append", "--store", db}, "more");
+        CHECK(call({"desc", id, "--store", db}).out == "from\nstdin\nmore",
+              "no blank line when appending after a trailing newline");
+
+        r = call({"show", id, "--json", "--store", db});
+        CHECK(r.out.find("\"description\": \"from\\nstdin\\nmore\"") != std::string::npos,
+              "show --json carries description");
+        r = call({"tree", "--json", "--store", db});
+        CHECK(r.out.find("\"description\"") != std::string::npos, "tree --json carries it too");
+        r = call({"show", id, "--store", db});
+        CHECK(r.out.find("stdin") != std::string::npos, "show prints the description");
+        r = call({"desc", id, "--json", "--store", db});
+        CHECK(r.out.find("\"description\"") != std::string::npos, "desc --json");
+
+        CHECK(call({"desc", id, "x", "--clear", "--store", db}).code == cli::kUsage,
+              "--clear takes no text");
+        CHECK(call({"desc", id, "--clear", "--append", "--store", db}).code == cli::kUsage,
+              "--clear and --append conflict");
+        CHECK(call({"desc", id, "--clear", "--store", db}).code == cli::kOk, "clear");
+        CHECK(call({"desc", id, "--store", db}).out.empty(), "cleared");
+        CHECK(call({"desc", "--store", db}).code == cli::kUsage, "desc needs a node");
+
+        // Finding by description works; addressing by name never does.
+        call({"desc", id, "mentions zebra", "--store", db});
+        const TaskId z = add(db, "zebra");
+        r = call({"find", "zebra", "--store", db});
+        CHECK(r.out.find("#" + std::to_string(z)) < r.out.find("#" + id) &&
+              r.out.find("#" + id) != std::string::npos,
+              "find lists the description hit after the text hit");
+        CHECK(call({"done", "zebra", "--store", db}).code == cli::kOk,
+              "a description mention does not make a name ambiguous");
         removeDb(db);
     }
 

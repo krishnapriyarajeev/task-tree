@@ -25,5 +25,9 @@ enum Exit {
 // Run one invocation. `args` is argv WITHOUT the program name. Parseable output goes to
 // `out`; every diagnostic goes to `err`, so stdout stays clean under `--json`.
 int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& err);
+// The same with an explicit stdin (read only by `desc <node> -`); the overload above
+// passes std::cin.
+int run(const std::vector<std::string>& args, std::istream& in, std::ostream& out,
+        std::ostream& err);
 
 } // namespace tt::cli
