@@ -238,6 +238,25 @@ the classifier outline all scope to it. Nothing moves: `main` always shows the w
   replaced the short-lived v4 `trees` partition (each tree folded into a workspace task).
   CLI: `tt workspaces`, `tt workspace <node>` (toggle), `[workspace]` in outlines.
 
+**Descriptions** — every task carries a free, multi-line plain-text `description` (empty by
+default; no structure imposed — usually an agent's notes: ticket, branch, PR, what "done"
+means). Nodes that have one show a small three-line marker in their top band.
+- **Card** (bottom-left, left of the input bar, clear of the DONE panel): shows the selected
+  canvas node's description, grows to ~45 % of the window then scrolls (wheel over it).
+  `Ctrl+D` or its chevron folds it to the header and back — view state in the store's
+  `meta` (`desc_collapsed`), so undo never toggles it.
+- **Editing**: `Ctrl+E` or a click on the body edits in place, in a second, multi-line
+  `TextInput`. Enter = newline, `Ctrl+Enter` or clicking away saves (one undo step, only if
+  changed), Esc cancels. While editing, `Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y` step the
+  card's own text history in word-sized steps (the tree's undo is untouched), canvas and
+  palette keys are inert, and store reloads are deferred.
+- **Search**: `?`, `:`/`>` text queries and `tt find` also match descriptions, ranked below
+  every match in a task's own text. `tt` name resolution (`tt done "foo"`) stays text-only.
+- Model/store: `Task::description`, schema v6 column, JSON key. Caret geometry for the
+  wrapped rows is pure (`ui/TextRows.hpp`); the card is `Renderer::layoutDescCard` /
+  `drawDescCard`. CLI: `tt desc <node> [text|-] [--append] [--clear]`; every `--json` task
+  shape has `description`.
+
 **DONE panel** (right edge)
 - Autohides: reveals when the cursor is within the right ~15%, hides when it moves ~17%
   out; a **PIN** button disables autohide. Translucent green.

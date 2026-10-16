@@ -40,7 +40,9 @@ be asked:
    forest as the save *baseline*, so it preserves every other task exactly (ids, order,
    parents, status, done state, and `next_id`) on its own — that is the whole reason it
    exists. Verbs: `tt find "ttd>"` (pending), `tt tree --json` (full read), `tt done <id>`,
-   `tt parent <child-id> <parent-id>`, `tt add "text" [--parent <id>]`, `tt rm <id>` (soft).
+   `tt parent <child-id> <parent-id>`, `tt add "text" [--parent <id>]`, `tt rm <id>` (soft),
+   `tt desc <id> [text|-] [--append] [--clear]` (a task's multi-line description — record
+   the branch / commit / PR there when filing a ttd task).
    Address the `ttd ✓ done` root — and any done task — **by id**: text search (`find`,
    name-queries) covers only the canvas, so a done node won't match; read its id once from
    `tt tree --json`. **You no longer need to stop the app.** It holds one connection and
