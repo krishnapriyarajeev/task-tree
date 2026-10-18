@@ -1195,4 +1195,171 @@ void Renderer::drawDonePanel(const DonePanelLayout& L, const Forest& f,
     nvgRestore(vg_);
 }
 
+// ---- note cards ----------------------------------------------------------------
+
+NoteCardLayout Renderer::layoutNoteCard(const Note& n, const std::string& title,
+                                        const std::string& body) const {
+    (void)title;   // one line, never wrapped: it does not change the geometry
+    NoteCardLayout L;
+    L.id = n.id;
+    const float w = n.w > 0.f ? n.w : kNoteDefaultWidth;
+
+    nvgFontFaceId(vg_, font_);
+    nvgFontSize(vg_, fontSize_);
+    nvgTextMetrics(vg_, &L.asc, &L.desc, &L.lineH);
+
+    const float headerH = fontSize_ + 18.f;
+    const float pad = 10.f;
+    const float contentW = w - 2 * padX_;
+    if (!body.empty()) {
+        const char* s = body.c_str();
+        const char* e = s + body.size();
+        const char* p = s;
+        NVGtextRow tr[16];
+        int k = 0;
+        while (p < e && (k = nvgTextBreakLines(vg_, p, e, contentW, tr, 16)) > 0) {
+            for (int i = 0; i < k; ++i)
+                L.rows.push_back({(int)(tr[i].start - s), (int)(tr[i].end - s), (int)(tr[i].next - s)});
+            p = tr[k - 1].next;
+        }
+    }
+    finishRows(L.rows, body);   // an empty body still has one row, for the caret
+
+    const float bodyH = static_cast<float>(L.rows.size()) * L.lineH;
+    L.card = {n.x, n.y, w, headerH + bodyH + 2 * pad};
+    L.header = {n.x, n.y, w, headerH};
+    const float bs = headerH - 12.f;
+    L.close = {n.x + w - 6.f - bs, n.y + 6.f, bs, bs};
+    L.title = {n.x + padX_, n.y, L.close.x - 6.f - (n.x + padX_), headerH};
+    L.body = {n.x, n.y + headerH, w, bodyH + 2 * pad};
+    L.tx = n.x + padX_;
+    L.textTop = n.y + headerH + pad;
+    return L;
+}
+
+void Renderer::drawNoteCard(const NoteCardLayout& L, const std::string& title,
+                            const std::string& body, NoteField editing, std::size_t caretByte,
+                            std::size_t selBegin, std::size_t selEnd, bool caretOn,
+                            const Config& cfg, Vec2 pan, float zoom, float titleScroll) const {
+    // Notes are amber, apart from the grey task nodes; selection-blue while editing, as
+    // for the description card and the bar.
+    const Color accent{240 / 255.f, 190 / 255.f, 90 / 255.f, 1.f};
+    const Color editBorder{120 / 255.f, 175 / 255.f, 255 / 255.f, 1.f};
+    const Color selCol{120 / 255.f, 175 / 255.f, 255 / 255.f, 1.f};
+
+    nvgSave(vg_);
+    nvgTranslate(vg_, pan.x, pan.y);   // screen = pan + zoom * world
+    nvgScale(vg_, zoom, zoom);
+
+    drawFieldChrome(L.card.x, L.card.y, L.card.w, L.card.h, cfg,
+                    editing != NoteField::None ? editBorder : accent);
+    // A tinted header strip with a hairline under it.
+    nvgBeginPath(vg_);
+    nvgRoundedRectVarying(vg_, L.header.x, L.header.y, L.header.w, L.header.h,
+                          cfg.cornerRadius, cfg.cornerRadius, 0.f, 0.f);
+    nvgFillColor(vg_, col(accent, 0.14f));
+    nvgFill(vg_);
+    nvgBeginPath(vg_);
+    nvgMoveTo(vg_, L.header.x, L.header.bottom());
+    nvgLineTo(vg_, L.header.right(), L.header.bottom());
+    nvgStrokeColor(vg_, col(accent, 0.35f));
+    nvgStrokeWidth(vg_, 1.f);
+    nvgStroke(vg_);
+
+    // ×: closes the card (it is kept; '#' opens it again).
+    {
+        const Rect& b = L.close;
+        const float cx = b.cx(), cy = b.cy(), s = b.w * 0.22f;
+        nvgBeginPath(vg_);
+        nvgMoveTo(vg_, cx - s, cy - s);
+        nvgLineTo(vg_, cx + s, cy + s);
+        nvgMoveTo(vg_, cx + s, cy - s);
+        nvgLineTo(vg_, cx - s, cy + s);
+        nvgStrokeColor(vg_, col(cfg.nodeText, 0.6f));
+        nvgStrokeWidth(vg_, 1.6f);
+        nvgLineCap(vg_, NVG_ROUND);
+        nvgStroke(vg_);
+        nvgLineCap(vg_, NVG_BUTT);
+    }
+
+    nvgFontFaceId(vg_, font_);
+    nvgFontSize(vg_, fontSize_);
+    const float midY = L.header.cy();
+
+    // Title: one line. While editing it scrolls to keep the caret in view; otherwise it is
+    // cut with an ellipsis.
+    nvgSave(vg_);
+    nvgIntersectScissor(vg_, L.title.x, L.title.y, L.title.w, L.title.h);
+    nvgTextAlign(vg_, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+    if (editing == NoteField::Title) {
+        const float x0 = L.title.x - titleScroll;
+        const std::size_t a = std::min(selBegin, title.size()), b = std::min(selEnd, title.size());
+        if (b > a) {
+            const float xa = textAdvance(title, 0, (int)a), xb = textAdvance(title, 0, (int)b);
+            nvgBeginPath(vg_);
+            nvgRect(vg_, x0 + xa, midY - L.lineH * 0.5f, xb - xa, L.lineH);
+            nvgFillColor(vg_, col(selCol, 0.30f));
+            nvgFill(vg_);
+        }
+        if (title.empty()) {
+            nvgFillColor(vg_, col(cfg.nodeText, 0.4f));
+            nvgText(vg_, L.title.x, midY, "Title", nullptr);
+        } else {
+            nvgFillColor(vg_, col(cfg.nodeText));
+            nvgText(vg_, x0, midY, title.c_str(), end(title));
+        }
+        if (caretOn)
+            drawCaret(x0 + textAdvance(title, 0, (int)std::min(caretByte, title.size())), midY, cfg);
+    } else if (title.empty()) {
+        nvgFillColor(vg_, col(cfg.nodeText, 0.45f));
+        nvgText(vg_, L.title.x, midY, "Untitled", nullptr);
+    } else {
+        nvgFillColor(vg_, col(cfg.nodeText));
+        const std::string shown = fitText(title, L.title.w);
+        nvgText(vg_, L.title.x, midY, shown.c_str(), end(shown));
+    }
+    nvgRestore(vg_);
+
+    // Body.
+    nvgTextAlign(vg_, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+    const auto rowTop = [&](int i) { return L.textTop + i * L.lineH; };
+    if (body.empty()) {
+        nvgFillColor(vg_, col(cfg.nodeText, 0.4f));
+        const char* ph = editing == NoteField::Body ? "Write — Enter for a new line"
+                                                    : "Click to write";
+        nvgText(vg_, L.tx, L.textTop, ph, nullptr);
+    } else {
+        if (editing == NoteField::Body && selEnd > selBegin) {
+            selBegin = std::min(selBegin, body.size());
+            selEnd = std::min(selEnd, body.size());
+            for (int i = 0; i < (int)L.rows.size(); ++i) {
+                const int rs = L.rows[i].start, re = L.rows[i].end;
+                const int a = std::max((int)selBegin, rs);
+                const bool nl = (int)selEnd > re && re < L.rows[i].next;
+                const int b = std::min((int)selEnd, re);
+                if (b < a || (b == a && !nl)) continue;
+                const float xa = textAdvance(body, rs, a);
+                const float xb = textAdvance(body, rs, b) + (nl ? fontSize_ * 0.3f : 0.f);
+                nvgBeginPath(vg_);
+                nvgRect(vg_, L.tx + xa, rowTop(i), xb - xa, L.lineH);
+                nvgFillColor(vg_, col(selCol, 0.30f));
+                nvgFill(vg_);
+            }
+        }
+        nvgFillColor(vg_, col(cfg.nodeText, 0.92f));
+        for (const TextRow& r : L.rows) {
+            if (r.end <= r.start) continue;
+            nvgText(vg_, L.tx, rowTop(static_cast<int>(&r - L.rows.data())),
+                    body.c_str() + r.start, body.c_str() + r.end);
+        }
+    }
+    if (editing == NoteField::Body && caretOn) {
+        const std::size_t cb = std::min(caretByte, body.size());
+        const int r = rowOfByte(L.rows, cb);
+        const float adv = textAdvance(body, L.rows[r].start, (int)cb);
+        drawCaret(L.tx + adv, rowTop(r) + (L.asc - L.desc) * 0.5f, cfg);
+    }
+    nvgRestore(vg_);
+}
+
 } // namespace tt

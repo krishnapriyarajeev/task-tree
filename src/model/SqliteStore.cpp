@@ -4,7 +4,8 @@
 //
 //   tasks(id, parent, ord, text, collapsed, status, created_at, done_at, deleted_at,
 //         workspace_at, description)
-//   meta(key, value)          -- next_id, current_view, desc_collapsed
+//   notes(id, title, body, view, x, y, w, open, created_at, deleted_at)
+//   meta(key, value)          -- next_id, next_note_id, current_view, desc_collapsed
 //
 // TWO TIMESTAMPS, NO BOOLEANS. `done_at` and `deleted_at` each carry both the state and
 // its date, so the pair can never disagree the way a flag beside a timestamp can:
@@ -54,8 +55,8 @@ namespace fs = std::filesystem;
 
 // 1 = original, 2 = + deleted_at, 3 = `done` boolean folded into done_at, 4 = + trees,
 // 5 = trees replaced by workspace_at (a workspace is a marked task, not a partition),
-// 6 = + description
-constexpr int kSchemaVersion = 6;
+// 6 = + description, 7 = + notes
+constexpr int kSchemaVersion = 7;
 
 const char* const kSchema =
     "CREATE TABLE IF NOT EXISTS tasks("
@@ -71,6 +72,17 @@ const char* const kSchema =
     "  workspace_at INTEGER NOT NULL DEFAULT 0,"  // 0 = plain task; epoch ms = made a workspace
     "  description TEXT   NOT NULL DEFAULT '');"   // free multi-line text; '' = none
     "CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent, ord);"
+    "CREATE TABLE IF NOT EXISTS notes("
+    "  id         INTEGER PRIMARY KEY,"
+    "  title      TEXT    NOT NULL DEFAULT '',"
+    "  body       TEXT    NOT NULL DEFAULT '',"
+    "  view       INTEGER NOT NULL DEFAULT 0,"    // 0 = main; else the workspace task's id
+    "  x          REAL    NOT NULL DEFAULT 0,"    // top-left, world coordinates
+    "  y          REAL    NOT NULL DEFAULT 0,"
+    "  w          REAL    NOT NULL DEFAULT 0,"    // 0 = the default width
+    "  open       INTEGER NOT NULL DEFAULT 1,"    // 0 = closed (kept, not drawn)
+    "  created_at INTEGER NOT NULL DEFAULT 0,"
+    "  deleted_at INTEGER NOT NULL DEFAULT 0);"   // soft delete, as for tasks
     "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value NOT NULL);";
 
 std::int64_t nowMs() {
@@ -239,6 +251,8 @@ bool upgradeSteps(const Db& db, int from) {
         if (from < 6 &&
             !db.exec("ALTER TABLE tasks ADD COLUMN description TEXT NOT NULL DEFAULT ''"))
             return false;
+        // 7 adds the notes table, which kSchema's CREATE TABLE IF NOT EXISTS has already
+        // made by the time this runs: nothing to move.
     }
     return db.exec(("PRAGMA user_version=" + std::to_string(kSchemaVersion)).c_str());
 }
@@ -284,6 +298,112 @@ bool sameRow(const Task& a, const Task& b) {
     return a.parent == b.parent && a.workspaceAt == b.workspaceAt && a.text == b.text &&
            a.collapsed == b.collapsed && a.status == b.status &&
            a.createdAt == b.createdAt && a.doneAt == b.doneAt && a.description == b.description;
+}
+
+bool loadNotes(const Db& db, Forest& f) {
+    f.notes.clear();
+    f.nextNoteId = 1;
+    Stmt q;
+    if (!q.prepare(db.h, "SELECT id,title,body,view,x,y,w,open,created_at"
+                         " FROM notes WHERE deleted_at=0 ORDER BY id"))
+        return false;
+    for (;;) {
+        const int rc = sqlite3_step(q.h);
+        if (rc == SQLITE_DONE) break;
+        if (rc != SQLITE_ROW) return false;
+        Note n;
+        n.id = static_cast<NoteId>(sqlite3_column_int64(q.h, 0));
+        if (n.id == 0) continue;
+        if (const unsigned char* s = sqlite3_column_text(q.h, 1))
+            n.title = reinterpret_cast<const char*>(s);
+        if (const unsigned char* s = sqlite3_column_text(q.h, 2))
+            n.body = reinterpret_cast<const char*>(s);
+        n.view = static_cast<TaskId>(sqlite3_column_int64(q.h, 3));
+        n.x = static_cast<float>(sqlite3_column_double(q.h, 4));
+        n.y = static_cast<float>(sqlite3_column_double(q.h, 5));
+        n.w = static_cast<float>(sqlite3_column_double(q.h, 6));
+        n.open = sqlite3_column_int(q.h, 7) != 0;
+        n.createdAt = sqlite3_column_int64(q.h, 8);
+        f.nextNoteId = std::max<NoteId>(f.nextNoteId, n.id + 1);
+        f.notes.emplace(n.id, std::move(n));
+    }
+    Stmt m;
+    if (m.prepare(db.h, "SELECT value FROM meta WHERE key='next_note_id'") &&
+        sqlite3_step(m.h) == SQLITE_ROW)
+        f.nextNoteId = std::max<NoteId>(f.nextNoteId,
+                                        static_cast<NoteId>(sqlite3_column_int64(m.h, 0)));
+    return true;
+}
+
+// Notes take the same incremental path as tasks: with a baseline, only changed notes are
+// written and a deletion is "in baseline, gone from f"; without one, every note is written
+// and any other live row is retired. Runs inside saveToDb's transaction.
+bool saveNotes(const Db& db, const Forest& f, const Forest* baseline) {
+    std::vector<NoteId> upserts, deletes;
+    if (baseline) {
+        for (const auto& [id, n] : f.notes) {
+            const Note* b = baseline->note(id);
+            if (!b || !sameNote(n, *b)) upserts.push_back(id);
+        }
+        for (const auto& [id, n] : baseline->notes)
+            if (!f.note(id)) deletes.push_back(id);
+    } else {
+        for (const auto& [id, n] : f.notes) upserts.push_back(id);
+        Stmt q;
+        if (!q.prepare(db.h, "SELECT id FROM notes WHERE deleted_at=0")) return false;
+        while (sqlite3_step(q.h) == SQLITE_ROW) {
+            const NoteId id = static_cast<NoteId>(sqlite3_column_int64(q.h, 0));
+            if (!f.note(id)) deletes.push_back(id);
+        }
+    }
+
+    if (!upserts.empty()) {
+        Stmt up;
+        if (!up.prepare(db.h,
+                        "INSERT INTO notes(id,title,body,view,x,y,w,open,created_at,deleted_at)"
+                        " VALUES(?,?,?,?,?,?,?,?,?,0)"
+                        " ON CONFLICT(id) DO UPDATE SET title=excluded.title,"
+                        " body=excluded.body, view=excluded.view, x=excluded.x, y=excluded.y,"
+                        " w=excluded.w, open=excluded.open, created_at=excluded.created_at,"
+                        " deleted_at=0"))
+            return false;
+        for (NoteId id : upserts) {
+            const Note* n = f.note(id);
+            sqlite3_reset(up.h);
+            sqlite3_bind_int64(up.h, 1, static_cast<sqlite3_int64>(n->id));
+            sqlite3_bind_text(up.h, 2, n->title.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(up.h, 3, n->body.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_int64(up.h, 4, static_cast<sqlite3_int64>(n->view));
+            sqlite3_bind_double(up.h, 5, n->x);
+            sqlite3_bind_double(up.h, 6, n->y);
+            sqlite3_bind_double(up.h, 7, n->w);
+            sqlite3_bind_int(up.h, 8, n->open ? 1 : 0);
+            sqlite3_bind_int64(up.h, 9, n->createdAt);
+            if (sqlite3_step(up.h) != SQLITE_DONE) return false;
+        }
+    }
+
+    if (!deletes.empty()) {
+        Stmt del;
+        if (!del.prepare(db.h, "UPDATE notes SET deleted_at=? WHERE id=? AND deleted_at=0"))
+            return false;
+        const std::int64_t when = nowMs();
+        for (NoteId id : deletes) {
+            sqlite3_reset(del.h);
+            sqlite3_bind_int64(del.h, 1, when);
+            sqlite3_bind_int64(del.h, 2, static_cast<sqlite3_int64>(id));
+            if (sqlite3_step(del.h) != SQLITE_DONE) return false;
+        }
+    }
+
+    // Like next_id, never backwards: another writer may already have used higher ids.
+    Stmt m;
+    if (!m.prepare(db.h, "INSERT INTO meta(key,value) VALUES('next_note_id',?)"
+                         " ON CONFLICT(key) DO UPDATE SET"
+                         " value=MAX(CAST(value AS INTEGER),CAST(excluded.value AS INTEGER))"))
+        return false;
+    sqlite3_bind_int64(m.h, 1, static_cast<sqlite3_int64>(f.nextNoteId));
+    return sqlite3_step(m.h) == SQLITE_DONE;
 }
 
 // The read itself, given an open connection. Shared by loadDb (fresh connection per
@@ -341,7 +461,7 @@ bool loadFromDb(const Db& db, Forest& f) {
     if (m.prepare(db.h, "SELECT value FROM meta WHERE key='next_id'") &&
         sqlite3_step(m.h) == SQLITE_ROW)
         f.nextId = std::max<TaskId>(f.nextId, static_cast<TaskId>(sqlite3_column_int64(m.h, 0)));
-    return true;
+    return loadNotes(db, f);
 }
 
 // The write itself, given an open connection. Shared by saveDb and Session::save.
@@ -441,6 +561,8 @@ bool saveToDb(const Db& db, const Forest& f, const Forest* baseline) {
             ok = sqlite3_step(m.h) == SQLITE_DONE;
         }
     }
+
+    if (ok) ok = saveNotes(db, f, baseline);
 
     if (!ok) {
         db.exec("ROLLBACK");

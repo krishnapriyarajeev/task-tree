@@ -30,6 +30,25 @@ TaskId Forest::addTask(std::string text, TaskId parent, std::int64_t createdAt) 
     return id;
 }
 
+NoteId Forest::addNote(std::string title, TaskId view, float x, float y, std::int64_t createdAt) {
+    const NoteId id = nextNoteId++;
+    Note n;
+    n.id = id;
+    n.title = std::move(title);
+    n.view = view;
+    n.x = x;
+    n.y = y;
+    n.createdAt = createdAt;
+    notes.emplace(id, std::move(n));
+    return id;
+}
+
+TaskId Forest::noteView(const Note& n) const {
+    if (n.view == kMainView) return kMainView;
+    const Task* t = get(n.view);
+    return (t && t->isWorkspace() && !isInDoneSection(n.view)) ? n.view : kMainView;
+}
+
 bool Forest::isDescendantOf(TaskId node, TaskId ancestor) const {
     TaskId cur = node;
     // Walk up parent links. Guard against malformed cycles with a bounded loop.
@@ -179,7 +198,18 @@ bool equivalent(const Forest& a, const Forest& b) {
             ta.children != tb->children)
             return false;
     }
+    if (a.nextNoteId != b.nextNoteId || a.notes.size() != b.notes.size()) return false;
+    for (const auto& [id, na] : a.notes) {
+        const Note* nb = b.note(id);
+        if (!nb || !sameNote(na, *nb)) return false;
+    }
     return true;
+}
+
+bool sameNote(const Note& a, const Note& b) {
+    return a.id == b.id && a.title == b.title && a.body == b.body && a.view == b.view &&
+           a.x == b.x && a.y == b.y && a.w == b.w && a.open == b.open &&
+           a.createdAt == b.createdAt;
 }
 
 void Forest::repairAfterLoad() {

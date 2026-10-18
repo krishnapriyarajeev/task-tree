@@ -424,7 +424,10 @@ int main() {
         CHECK(infoFor(Mode::Find)->prefix == '?', "find's symbol");
         CHECK(std::string(infoFor(Mode::Select)->name) == "select", "select's chip label");
         CHECK(infoFor(Mode::Add) == nullptr, "add has no chip");
-        CHECK(modes().size() == 5, "five modes are offered in the menu");
+        CHECK(modes().size() == 6, "six modes are offered in the menu");
+        CHECK(modeForPrefix('#') == Mode::Notes, "# -> notes list");
+        CHECK(interpret(Mode::Notes, " shop ").kind == Kind::GoNote &&
+              interpret(Mode::Notes, " shop ").query == "shop", "# -> open a note, query trimmed");
         CHECK(modeForPrefix('@') == Mode::Workspace, "@ -> workspace switcher");
         CHECK(modeForPrefix('+') == Mode::NewWorkspace, "+ -> new workspace");
         CHECK(interpret(Mode::Workspace, " wo ").kind == Kind::GoWorkspace, "@ -> go");
@@ -538,6 +541,35 @@ int main() {
               "limit cuts across the joined list");
         CHECK((rankMatches(f, "ticket", 0, kMainView, false) == std::vector<TaskId>{both, text}),
               "descriptions can be left out (CLI name resolution)");
+    }
+
+    { // notes: ids, the view fallback, ranking, and ids never reused across undo
+        using namespace tt::palette;
+        Forest f;
+        const TaskId ws = f.addTask("work");
+        f.get(ws)->workspaceAt = 1;
+        const NoteId a = f.addNote("Shopping list", kMainView, 0.f, 0.f);
+        const NoteId b = f.addNote("Ideas", ws, 0.f, 0.f);
+        const NoteId c = f.addNote("Misc", kMainView, 0.f, 0.f);
+        f.note(c)->body = "buy a shopping bag";
+        CHECK(a == 1 && b == 2 && f.note(b)->open, "notes get fresh ids and start open");
+        CHECK(f.noteView(*f.note(b)) == ws, "a note shows in its workspace");
+        f.get(ws)->workspaceAt = 0;
+        CHECK(f.noteView(*f.note(b)) == kMainView, "an unmarked workspace's note falls back to main");
+        f.get(ws)->workspaceAt = 1;
+        f.markDone(ws, 5);
+        CHECK(f.noteView(*f.note(b)) == kMainView, "so does a done workspace's note");
+
+        CHECK((rankNotes(f, "") == std::vector<NoteId>{a, b, c}), "empty query: all, oldest first");
+        CHECK((rankNotes(f, "SHOP") == std::vector<NoteId>{a, c}), "title match before body match");
+        CHECK(rankNotes(f, "nothing").empty(), "no match");
+
+        History h;
+        h.snapshot(f);
+        const NoteId d = f.addNote("temp", kMainView, 0.f, 0.f);
+        h.undo(f);
+        CHECK(!f.note(d), "undo removes the added note");
+        CHECK(f.addNote("next", kMainView, 0.f, 0.f) != d, "a note id is never reused after undo");
     }
 
     { // shortDate: the tiny chip date ("jul 27", year added only when it differs)

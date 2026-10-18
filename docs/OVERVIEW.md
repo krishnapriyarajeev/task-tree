@@ -257,6 +257,23 @@ means). Nodes that have one show a small three-line marker in their top band.
   `drawDescCard`. CLI: `tt desc <node> [text|-] [--append] [--clear]`; every `--json` task
   shape has `description`.
 
+**Notes** — cards with a title and free text, separate from the task tree. A card sits on the
+canvas in world coordinates, so it pans and zooms with the tasks, and belongs to the view it
+was made in (a gone/done/unmarked workspace's notes fall back to main: `Forest::noteView`).
+- **Make**: `Ctrl+N` at the cursor (title first), or `#title` + Enter when no note matches
+  (text first). An empty new note is never saved: Esc or a click away just drops it.
+- **Edit in place**: click the title or the text. Tab or Enter/Down move title → text, Up on
+  the first line goes back; `Ctrl+Enter` or a click away saves (one undo step), Esc cancels,
+  `Ctrl+Z` steps the field's own text history while editing. `Ctrl+Shift+Delete` deletes the
+  note (undoable).
+- **Move**: drag the header (a click without moving edits the title). **Close**: the × hides
+  the card but keeps it; `#` in the bar lists every note (any view, closed ones marked) and
+  Enter opens one, going to its view and gliding to it.
+- Model/store: `Note` + `Forest::notes`/`nextNoteId` (own id space), so undo, reload and
+  the baseline-diffed save cover notes for free. Schema v7 `notes` table, soft delete like
+  tasks; JSON keys `notes`/`nextNoteId`. Drawn by `Renderer::layoutNoteCard`/`drawNoteCard`.
+  CLI: `tt notes`, `tt note add|show|edit|text|rm`.
+
 **DONE panel** (right edge)
 - Autohides: reveals when the cursor is within the right ~15%, hides when it moves ~17%
   out; a **PIN** button disables autohide. Translucent green.

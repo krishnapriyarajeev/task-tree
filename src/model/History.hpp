@@ -24,6 +24,7 @@ public:
     // any redo states are dropped, since a fresh edit invalidates the redone future.
     void record(Forest snapshot) {
         highWater_ = std::max(highWater_, snapshot.nextId);
+        noteHighWater_ = std::max(noteHighWater_, snapshot.nextNoteId);
         past_.push_back(std::move(snapshot));
         if (past_.size() > maxDepth_) past_.erase(past_.begin());
         future_.clear();
@@ -56,16 +57,19 @@ private:
     // DONE-expanded set, in-flight classifications) could silently rebind.
     void swapInto(Forest& cur, std::vector<Forest>& from, std::vector<Forest>& to) {
         highWater_ = std::max(highWater_, cur.nextId);
+        noteHighWater_ = std::max(noteHighWater_, cur.nextNoteId);
         to.push_back(std::move(cur));
         cur = std::move(from.back());
         from.pop_back();
         cur.nextId = std::max(cur.nextId, highWater_);
+        cur.nextNoteId = std::max(cur.nextNoteId, noteHighWater_);
     }
 
     std::vector<Forest> past_;   // checkpoints, oldest first; back() is the next undo
     std::vector<Forest> future_; // undone states; back() is the next redo
     std::size_t maxDepth_;
     TaskId highWater_ = 0;       // max nextId ever seen; keeps ids monotonic across undo
+    NoteId noteHighWater_ = 0;   // the same for nextNoteId
 };
 
 } // namespace tt

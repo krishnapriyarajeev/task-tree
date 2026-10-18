@@ -14,6 +14,7 @@
 //   >         Parent   make a node the parent of the selection (same two ways)
 //   @         Workspace     go to a workspace by name (no match: Enter creates it)
 //   +         NewWorkspace  create a workspace here: a new node, marked, entered
+//   #         Notes    open a note by title (no match: Enter creates one)
 //
 // In Select/Parent a leading '?' in the argument forces a text query, so the ':?12' /
 // '>?query' spellings work exactly as typed. To add a task that starts with a prefix
@@ -32,11 +33,11 @@
 namespace tt::palette {
 
 // What the bar is doing. Drives the chip label, the accent colour and the drop-up.
-enum class Mode { Add, Menu, Find, Select, Parent, Workspace, NewWorkspace };
+enum class Mode { Add, Menu, Find, Select, Parent, Workspace, NewWorkspace, Notes };
 
 // The resolved action for the current (mode, argument) pair.
 enum class Kind { AddTask, Find, SelectId, SelectText, ParentId, ParentText,
-                  GoWorkspace, NewWorkspace };
+                  GoWorkspace, NewWorkspace, GoNote };
 
 struct Command {
     Kind kind = Kind::AddTask;
@@ -53,6 +54,8 @@ struct Command {
     bool reparents() const { return kind == Kind::ParentId || kind == Kind::ParentText; }
     // The workspace switcher, picked from rankWorkspaces (↑/↓ and the drop-up apply).
     bool picksWorkspace() const { return kind == Kind::GoWorkspace; }
+    // The notes list, picked from rankNotes (↑/↓ and the drop-up apply).
+    bool picksNote() const { return kind == Kind::GoNote; }
 };
 
 // One row of the '/' menu, and the source of every mode's chip label + accent.
@@ -88,5 +91,10 @@ std::vector<TaskId> rankMatches(const Forest& f, const std::string& query,
 // Workspaces whose text contains `query` (case-insensitive), ranked like rankMatches, ties
 // in Forest::workspaces() order — which an empty query returns as is.
 std::vector<TaskId> rankWorkspaces(const Forest& f, const std::string& query);
+
+// Notes for the '#' list. An empty query returns every note, open or closed, oldest first.
+// Otherwise case-insensitive substring matches: title matches first, then body-only
+// matches, each ranked like rankMatches (match position, then length, then id).
+std::vector<NoteId> rankNotes(const Forest& f, const std::string& query);
 
 } // namespace tt::palette

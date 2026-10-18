@@ -52,6 +52,11 @@ TaskId idField(const json& j, const char* key) {
     return it == j.end() ? 0 : asId(*it);
 }
 
+float floatField(const json& j, const char* key) {
+    const auto it = j.find(key);
+    return (it != j.end() && it->is_number()) ? it->get<float>() : 0.f;
+}
+
 } // namespace
 
 bool isDbPath(const std::string& path) {
@@ -138,6 +143,28 @@ bool loadJson(Forest& f, const std::string& path) {
     // Couldn't read an explicit roots order: drop the partially-filled list so
     // repairAfterLoad() below rebuilds it from the parent-less nodes (id-sorted).
     if (!ok) f.roots.clear();
+
+    f.notes.clear();
+    f.nextNoteId = 1;
+    if (const auto it = j.find("notes"); it != j.end() && it->is_array()) {
+        for (const auto& jn : *it) {
+            if (!jn.is_object()) continue;
+            Note n;
+            n.id = idField(jn, "id");
+            if (n.id == 0) continue;
+            n.title = strField(jn, "title");
+            n.body = strField(jn, "body");
+            n.view = idField(jn, "view");
+            n.x = floatField(jn, "x");
+            n.y = floatField(jn, "y");
+            n.w = floatField(jn, "w");
+            n.open = boolField(jn, "open", true);
+            n.createdAt = numField(jn, "createdAt");
+            f.nextNoteId = std::max<NoteId>(f.nextNoteId, n.id + 1);
+            f.notes.emplace(n.id, std::move(n));
+        }
+    }
+    f.nextNoteId = std::max<NoteId>(f.nextNoteId, static_cast<NoteId>(numField(j, "nextNoteId")));
     // The file can disagree with itself — `parent` and `children` are two encodings of one
     // edge, and an older or hand-written file may have only the former. Reconcile them so no
     // task is left existing-but-unreachable.
@@ -207,11 +234,27 @@ bool saveJson(const Forest& f, const std::string& path) {
     }
     // No "doneRoots": every top-level task is in `roots` now, done or not (loadJson still
     // reads the old key so pre-existing files keep working).
+    json notes = json::array();
+    for (const auto& [id, n] : f.notes) {
+        notes.push_back({
+            {"id", n.id},
+            {"title", n.title},
+            {"body", n.body},
+            {"view", n.view},
+            {"x", n.x},
+            {"y", n.y},
+            {"w", n.w},
+            {"open", n.open},
+            {"createdAt", n.createdAt},
+        });
+    }
     json j = {
         {"version", 2},
         {"nextId", f.nextId},
         {"roots", f.roots},
         {"tasks", std::move(tasks)},
+        {"nextNoteId", f.nextNoteId},
+        {"notes", std::move(notes)},
     };
 
     // Atomic: write a sibling temp file, then rename over the target.

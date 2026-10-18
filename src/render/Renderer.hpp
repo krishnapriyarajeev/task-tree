@@ -89,6 +89,24 @@ struct DescCardLayout {
     std::string title;         // "#12 description"
 };
 
+// A note card (see model/Task.hpp Note), laid out by Renderer::layoutNoteCard in WORLD
+// coordinates: it is drawn inside the canvas transform, so it pans and zooms with the
+// tasks, and App hit-tests it against the world-space cursor. The title is one line in the
+// header; `rows` are the wrapped body rows (byte ranges, as for the description card).
+struct NoteCardLayout {
+    NoteId id = 0;
+    Rect  card;                // the whole card
+    Rect  header;              // title strip; dragging it moves the card
+    Rect  close;               // × in the header: closes (hides) the card
+    Rect  title;               // where the title text sits (header minus the ×)
+    Rect  body;                // text area
+    float tx = 0.f, textTop = 0.f, lineH = 0.f, asc = 0.f, desc = 0.f;
+    std::vector<TextRow> rows;
+};
+
+// Which part of a note card has the caret.
+enum class NoteField { None, Title, Body };
+
 // One visible row in the DONE panel's expandable, indented tree.
 struct DoneRow {
     TaskId id = 0;
@@ -167,6 +185,19 @@ public:
     // Advance width of text[from, to) in the card's font — the advance function the
     // ui/TextRows helpers take, so caret maths matches what is drawn.
     float textAdvance(const std::string& text, int from, int to) const;
+
+    // Note cards (see NoteCardLayout). Layout only measures text, so App may call it between
+    // frames for hit tests. `title`/`body` are what to show — the editor's text while editing.
+    static constexpr float kNoteDefaultWidth = 280.f;
+    NoteCardLayout layoutNoteCard(const Note& n, const std::string& title,
+                                  const std::string& body) const;
+    // Draw one card under the canvas transform (screen = pan + zoom * world). `editing` is
+    // the field with the caret; [selBegin, selEnd) is its selection. `titleScroll` shifts a
+    // long title left while it is edited; App owns it, so its click-to-caret agrees.
+    void drawNoteCard(const NoteCardLayout& L, const std::string& title, const std::string& body,
+                      NoteField editing, std::size_t caretByte, std::size_t selBegin,
+                      std::size_t selEnd, bool caretOn, const Config& cfg, Vec2 pan,
+                      float zoom, float titleScroll = 0.f) const;
 
     // The workspace picker (see ViewPickerLayout): button always, list card when open.
     void drawViewPicker(const ViewPickerLayout& layout, const Config& cfg);

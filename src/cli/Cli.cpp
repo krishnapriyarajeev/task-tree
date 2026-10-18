@@ -249,8 +249,17 @@ void printHelp(std::ostream& out) {
         "  desc <node> [<text>|-] [--append] [--clear]\n"
         "                                 print a task's description (no text), replace it,\n"
         "                                 read it from stdin (-), add a line, or empty it\n"
+        "Notes:\n"
+        "  notes                          every note, oldest first ([closed] = hidden card)\n"
+        "  note add <title> [<text>]      add a note on the main view (prints the new id)\n"
+        "  note show <note>               a note's title and text\n"
+        "  note edit <note> <title>       replace a note's title\n"
+        "  note text <note> [<text>|-] [--append] [--clear]\n"
+        "                                 print, replace, read from stdin, add a line, or empty\n"
+        "  note rm <note>                 soft-delete a note\n"
         "\n"
         "A <node> is a numeric id or a text query (unique match required; ambiguity is an error).\n"
+        "A <note> is the same, matched against note titles. Note ids are separate from task ids.\n"
         "\n"
         "Global flags:\n"
         "  --json                   emit one JSON document on stdout (diagnostics stay on stderr)\n"
@@ -478,6 +487,147 @@ int cmdDesc(const Args& a, const std::string& path, Forest& baseline, std::istre
     return saveStore(work, path, baseline, err);
 }
 
+// ---- notes -------------------------------------------------------------------
+
+// A note spec: a number is a note id, anything else a case-insensitive substring of the
+// title. Like resolveNode, ambiguity is an error and only titles count, never body text.
+Exit resolveNote(const Forest& f, const std::string& spec, NoteId& out, std::ostream& err) {
+    if (spec.empty()) {   // an unset $ID must not match every title
+        err << "an empty note name matches nothing — give an id or part of a title\n";
+        return kUsage;
+    }
+    if (allDigits(spec)) {
+        NoteId id = 0;
+        const char* end = spec.data() + spec.size();
+        if (std::from_chars(spec.data(), end, id).ec == std::errc{} && f.note(id)) {
+            out = id;
+            return kOk;
+        }
+        err << "no note with id " << spec << "\n";
+        return kNotFound;
+    }
+    std::vector<NoteId> matches;
+    for (NoteId id : palette::rankNotes(f, spec)) {
+        std::string t = f.note(id)->title, q = spec;
+        for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        for (char& c : q) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (t.find(q) != std::string::npos) matches.push_back(id);   // titles only
+    }
+    if (matches.empty()) {
+        err << "no note title matches \"" << spec << "\"\n";
+        return kNotFound;
+    }
+    if (matches.size() > 1) {
+        err << "\"" << spec << "\" is ambiguous — " << matches.size() << " notes:\n";
+        for (std::size_t i = 0; i < matches.size() && i < 12; ++i)
+            err << "  #" << matches[i] << " " << f.note(matches[i])->title << "\n";
+        err << "address it by id, or narrow the query.\n";
+        return kAmbiguous;
+    }
+    out = matches.front();
+    return kOk;
+}
+
+json noteFields(const Note& n) {
+    return json{
+        {"id", n.id},
+        {"title", n.title},
+        {"body", n.body},
+        {"view", n.view},
+        {"open", n.open},
+        {"created_at", n.createdAt},
+    };
+}
+
+int cmdNotes(const Args& a, const Forest& f, std::ostream& out) {
+    if (a.json) {
+        json arr = json::array();
+        for (const auto& [id, n] : f.notes) arr.push_back(noteFields(n));
+        out << arr.dump(2) << "\n";
+    } else {
+        for (const auto& [id, n] : f.notes)
+            out << "#" << id << " " << (n.title.empty() ? "(untitled)" : n.title)
+                << (n.open ? "" : " [closed]") << "\n";
+    }
+    return kOk;
+}
+
+int cmdNote(const Args& a, const std::string& path, Forest& baseline, std::istream& in,
+            std::ostream& out, std::ostream& err) {
+    if (a.rest.empty()) { err << "note needs a verb: add, show, edit, text or rm\n"; return kUsage; }
+    const std::string& verb = a.rest[0];
+    const std::vector<std::string> args(a.rest.begin() + 1, a.rest.end());
+    Forest work = baseline;
+
+    if (verb == "add") {
+        if (args.empty()) { err << "note add needs a title\n"; return kUsage; }
+        // The app places a note where you make it; from here there is no cursor, so put
+        // it near the top-left of main, stepped down past any note already at that spot.
+        float x = 40.f, y = 80.f;
+        for (bool moved = true; moved;) {
+            moved = false;
+            for (const auto& [id, n] : work.notes)
+                if (n.view == kMainView && n.x == x && n.y == y) { x += 24.f; y += 24.f; moved = true; }
+        }
+        const NoteId id = work.addNote(args[0], kMainView, x, y, nowMs());
+        if (args.size() >= 2) work.note(id)->body = args[1];
+        if (const Exit e = saveStore(work, path, baseline, err); e != kOk) return e;
+        if (a.json) out << json{{"id", id}}.dump() << "\n";
+        else out << id << "\n";
+        return kOk;
+    }
+    if (verb != "show" && verb != "edit" && verb != "text" && verb != "rm") {
+        err << "unknown note verb \"" << verb << "\" (add, show, edit, text, rm)\n";
+        return kUsage;
+    }
+    if (args.empty()) { err << "note " << verb << " needs a note\n"; return kUsage; }
+    NoteId id = 0;
+    if (const Exit e = resolveNote(work, args[0], id, err); e != kOk) return e;
+    Note& n = *work.note(id);
+
+    if (verb == "show") {
+        if (a.json) {
+            out << noteFields(n).dump(2) << "\n";
+        } else {
+            out << "#" << n.id << " " << (n.title.empty() ? "(untitled)" : n.title)
+                << (n.open ? "" : " [closed]") << "\n";
+            if (!n.body.empty()) out << n.body << (n.body.back() == '\n' ? "" : "\n");
+        }
+        return kOk;
+    }
+    if (verb == "edit") {
+        if (args.size() < 2) { err << "note edit needs a note and a title\n"; return kUsage; }
+        n.title = args[1];
+        return saveStore(work, path, baseline, err);
+    }
+    if (verb == "rm") {
+        work.removeNote(id);
+        return saveStore(work, path, baseline, err);   // baseline -> a soft delete
+    }
+
+    // text: the same contract as `desc`.
+    const bool hasText = args.size() >= 2;
+    if (a.clear && (hasText || a.append)) { err << "--clear takes no text and no --append\n"; return kUsage; }
+    if (a.append && !hasText) { err << "--append needs text (or -)\n"; return kUsage; }
+    if (!hasText && !a.clear) {
+        if (a.json) out << json{{"id", id}, {"body", n.body}}.dump() << "\n";
+        else out << n.body;
+        return kOk;
+    }
+    std::string text;
+    if (args.size() >= 2 && args[1] == "-")
+        text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    else if (hasText)
+        text = args[1];
+    if (a.append) {
+        if (!n.body.empty() && n.body.back() != '\n') n.body += '\n';
+        n.body += text;
+    } else {
+        n.body = std::move(text);
+    }
+    return saveStore(work, path, baseline, err);
+}
+
 int cmdRm(const Args& a, const std::string& path, Forest& baseline, std::ostream& err) {
     if (a.rest.empty()) { err << "rm needs a node\n"; return kUsage; }
     Forest work = baseline;
@@ -537,6 +687,8 @@ int run(const std::vector<std::string>& argv, std::istream& in, std::ostream& ou
     if (a.command == "workspaces") return cmdWorkspaces(a, forest, out);
     if (a.command == "workspace")  return cmdWorkspace(a, path, forest, out, err);
     if (a.command == "desc")       return cmdDesc(a, path, forest, in, out, err);
+    if (a.command == "notes")      return cmdNotes(a, forest, out);
+    if (a.command == "note")       return cmdNote(a, path, forest, in, out, err);
 
     err << "unknown command \"" << a.command << "\" (try --help)\n";
     return kUsage;

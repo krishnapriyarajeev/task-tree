@@ -50,6 +50,7 @@ App::App(IPlatform& platform, Renderer& renderer, IClassifier& classifier,
     view_ = session_.currentView();   // reopen the workspace the overlay last showed
     descCollapsed_ = session_.descCollapsed();
     descInput_.setMultiline(true);
+    noteBodyInput_.setMultiline(true);
     if (view_ != kMainView && !(forest_.exists(view_) && forest_.get(view_)->isWorkspace() &&
                                 !forest_.isInDoneSection(view_)))
         view_ = kMainView;
@@ -70,6 +71,10 @@ void App::toggleOverlay() {
 }
 
 void App::showQuickAdd() {
+    // The cards are not drawn in quick-add, so an edit in one must not keep the keys.
+    if (descEditing_ != 0) commitDescEdit();
+    if (noteEditing_ != 0) commitNoteEdit();
+    endNoteDrag();
     mode_ = Mode::QuickAdd;
     editingNode_ = 0;
     clearPalette();
@@ -80,6 +85,8 @@ void App::showQuickAdd() {
 void App::hide() {
     if (descEditing_ != 0) commitDescEdit();   // hiding mid-edit keeps what was typed
     descSelecting_ = false;
+    if (noteEditing_ != 0) commitNoteEdit();   // the same for a note card
+    endNoteDrag();
     mode_ = Mode::Hidden;
     input_.setFocused(false);
     input_.clear();
@@ -101,6 +108,12 @@ void App::hide() {
 
 void App::onChar(unsigned int codepoint) {
     if (mode_ == Mode::Hidden) return;
+    if (noteEditing_ != 0) {               // a note card has keyboard focus
+        noteInput().onChar(codepoint);
+        noteColumnX_ = -1.f;
+        resetCaretBlink();
+        return;
+    }
     if (descEditing_ != 0) {               // the card has keyboard focus
         descInput_.onChar(codepoint);
         descColumnX_ = -1.f;
@@ -122,7 +135,8 @@ void App::onKey(int key, int action, int mods) {
 
     if (action == GLFW_RELEASE || mode_ == Mode::Hidden) return;
 
-    // While the description card edits, every key is the card's (see handleDescKey).
+    // While a note card or the description card edits, every key is that card's.
+    if (noteEditing_ != 0) { handleNoteKey(key, mods); return; }
     if (descEditing_ != 0) { handleDescKey(key, mods); return; }
 
     if (key == GLFW_KEY_ESCAPE && viewMenuOpen_) { viewMenuOpen_ = false; return; }
@@ -157,6 +171,16 @@ void App::onKey(int key, int action, int mods) {
         if (mode_ == Mode::Full && key == GLFW_KEY_D) { toggleDescCollapsed(); return; }
         if (mode_ == Mode::Full && key == GLFW_KEY_E && editingNode_ == 0 && descNode() != 0) {
             startDescEdit();
+            return;
+        }
+        // Ctrl+N: a new note card at the cursor (or mid-screen when the cursor is elsewhere).
+        if (mode_ == Mode::Full && key == GLFW_KEY_N) {
+            const bool inside = mouse_.x >= 0.f && mouse_.y >= 0.f &&
+                                mouse_.x < lastWinW_ && mouse_.y < lastWinH_;
+            const Vec2 at = inside ? worldMouse()
+                                   : Vec2{(lastWinW_ * 0.5f - pan_.x) / zoom_,
+                                          (lastWinH_ * 0.4f - pan_.y) / zoom_};
+            createNote({}, at);
             return;
         }
         if (key == GLFW_KEY_V) {
@@ -264,8 +288,11 @@ void App::updatePalette() {
     candidates_.clear();
     menuItems_.clear();
     wsCands_.clear();
+    noteCands_.clear();
     searchHits_.clear();
-    if (pmode_ == palette::Mode::Menu) {
+    if (cmd_.picksNote()) {
+        noteCands_ = palette::rankNotes(forest_, cmd_.query);   // every note, any view
+    } else if (pmode_ == palette::Mode::Menu) {
         // The menu is a pure picker: every mode, always, in display order.
         for (const palette::ModeInfo& i : palette::modes()) menuItems_.push_back(i.mode);
     } else if (cmd_.picksWorkspace()) {
@@ -317,6 +344,7 @@ void App::enterFindMode() {
 std::size_t App::paletteRows() const {
     if (!candidates_.empty()) return candidates_.size();
     if (!wsCands_.empty()) return wsCands_.size();
+    if (!noteCands_.empty()) return noteCands_.size();
     return menuItems_.size();
 }
 
@@ -399,6 +427,20 @@ void App::runCommand() {
             createWorkspace(name);
             return;
         }
+        case palette::Kind::GoNote: {
+            const bool pick = hasNoteCandidate();
+            const NoteId id = pick ? noteCands_[candidateIdx_] : 0;
+            const std::string title = cmd_.query;
+            if (!pick && title.empty()) return;
+            clearPalette();
+            if (pick) {
+                openNote(id);
+            } else {   // no note by that title: make one mid-screen, its text ready to type
+                createNote(title, {(lastWinW_ * 0.5f - pan_.x) / zoom_,
+                                   (lastWinH_ * 0.3f - pan_.y) / zoom_});
+            }
+            return;
+        }
     }
 }
 
@@ -430,6 +472,7 @@ Color App::paletteTint() const {
         case palette::Mode::Parent: return cfg_.dropHint;
         case palette::Mode::Workspace:
         case palette::Mode::NewWorkspace: return {185 / 255.f, 150 / 255.f, 255 / 255.f, 1.f};
+        case palette::Mode::Notes:  return {240 / 255.f, 190 / 255.f, 90 / 255.f, 1.f};  // the cards' amber
         case palette::Mode::Menu:
         case palette::Mode::Add:    break;
     }
@@ -472,6 +515,10 @@ std::string App::paletteStatus() const {
             return cmd_.query.empty() ? std::string{} : "Enter creates “" + cmd_.query + "”";
         case palette::Kind::NewWorkspace:
             return cmd_.body.empty() ? std::string{} : "Enter creates “" + cmd_.body + "”";
+        case palette::Kind::GoNote:
+            if (hasNoteCandidate()) return "→ open note " + std::to_string(noteCands_[candidateIdx_]);
+            if (cmd_.query.empty()) return forest_.notes.empty() ? "no notes yet — type a title" : "";
+            return "Enter creates “" + cmd_.query + "”";
         case palette::Kind::AddTask:
             break;
     }
@@ -514,6 +561,28 @@ void App::drawPaletteDropUp(const Rect& inputBox) {
         return;
     }
 
+    // The '#' list: every note, any view; where it lives and whether it is closed are noted.
+    if (!noteCands_.empty()) {
+        const std::size_t n = noteCands_.size();
+        std::size_t first = (candidateIdx_ > 0) ? candidateIdx_ - 1 : 0;
+        first = (n > kRows) ? std::min(first, n - kRows) : 0;
+        const std::size_t shown = std::min(kRows, n - first);
+        std::vector<std::pair<std::string, std::string>> rows;
+        for (std::size_t i = first; i < first + shown; ++i) {
+            const Note* note = forest_.note(noteCands_[i]);
+            if (!note) continue;
+            std::string text = note->title.empty() ? "Untitled" : note->title;
+            const TaskId v = forest_.noteView(*note);
+            if (v != view_) text += "  · in " + viewName(v);
+            if (!note->open) text += "  · closed";
+            rows.emplace_back("#" + std::to_string(note->id), text);
+        }
+        renderer_.drawPalette(inputBox, rows, static_cast<int>(candidateIdx_ - first),
+                              static_cast<int>(n - (first + shown)),
+                              "↑↓ pick · Enter open · Esc cancel", paletteTint(), cfg_);
+        return;
+    }
+
     if (candidates_.empty()) return;
     // Window the list so the ↑/↓ cursor stays visible, with one row of lead-in above it.
     const std::size_t n = candidates_.size();
@@ -553,6 +622,13 @@ void App::onMouseButton(int button, int action, int mods) {
     // The top-left tree picker sits above everything else on screen.
     if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS && handleViewPickerClick())
         return;
+
+    // A press anywhere but on the card being edited saves that card's edit; the press then
+    // goes on as normal (as for the description card below).
+    if (noteEditing_ != 0 && action == GLFW_PRESS) {
+        const NoteCardLayout* hit = overScreenUi() ? nullptr : noteCardAt(worldMouse());
+        if (!hit || hit->id != noteEditing_) commitNoteEdit();
+    }
 
     // Description card. A drag that began in its body keeps selecting until release.
     if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_RELEASE && descSelecting_) {
@@ -629,6 +705,9 @@ void App::onMouseButton(int button, int action, int mods) {
     // Clicking anywhere while editing commits the pending text edit first, then the click
     // is handled normally (select another node, pan, etc.).
     if (editingNode_ != 0 && action == GLFW_PRESS) commitEdit(trim(input_.text()));
+
+    // Note cards sit over the tree: a press on one is the card's, never a node's below it.
+    if (handleNoteMouse(button, action, mods)) return;
 
     // Right-click a canvas node to cycle its status colour: default -> yellow
     // (in progress) -> orange (priority) -> default.
@@ -723,6 +802,25 @@ void App::onMouseButton(int button, int action, int mods) {
 
 void App::onCursorPos(double x, double y) {
     mouse_ = {static_cast<float>(x), static_cast<float>(y)};
+    if (noteSelecting_ && noteEditing_ != 0 && mode_ == Mode::Full) {
+        const NoteCardLayout L = layoutNote(noteEditing_);
+        noteInput().moveCaretTo(noteByteAt(L, noteField_, worldMouse()), /*extend=*/true);
+        resetCaretBlink();
+        return;
+    }
+    if (noteDrag_ != 0) {
+        // A few pixels of slack, so a click on the title is not read as a tiny move.
+        if (!noteDragMoved_ && std::fabs(mouse_.x - noteDragScreen_.x) < 4.f &&
+            std::fabs(mouse_.y - noteDragScreen_.y) < 4.f)
+            return;
+        noteDragMoved_ = true;
+        if (Note* n = forest_.note(noteDrag_)) {
+            const Vec2 w = worldMouse();
+            n->x = noteDragOrigin_.x + (w.x - noteDragGrab_.x);
+            n->y = noteDragOrigin_.y + (w.y - noteDragGrab_.y);
+        }
+        return;
+    }
     if (descSelecting_ && descEditing_ != 0 && mode_ == Mode::Full) {
         descInput_.moveCaretTo(descByteAt(layoutDescFor(descEditing_), mouse_), /*extend=*/true);
         resetCaretBlink();
@@ -909,6 +1007,9 @@ void App::pushClassification(TaskId newTask, ClassifyResult result) {
 }
 
 void App::applyPendingClassifications() {
+    // Deferred while a new note is being typed or a card is being dragged: both hold an undo
+    // checkpoint from before the gesture, and a move recorded in between would fold into it.
+    if ((noteEditing_ != 0 && noteIsNew_) || noteDrag_ != 0) return;
     std::vector<std::pair<TaskId, ClassifyResult>> local;
     {
         std::lock_guard<std::mutex> lock(pendingMutex_);
@@ -1032,8 +1133,17 @@ void App::drawScene(int winW, int winH, float dpr) {
     // After a view change: a remembered camera that shows none of the view's nodes is stale.
     if (verifyView_) {
         verifyView_ = false;
-        const bool anyVisible = std::any_of(rects_.begin(), rects_.end(),
-                                            [this](const auto& kv) { return nodeOnScreen(kv.first); });
+        bool anyVisible = std::any_of(rects_.begin(), rects_.end(),
+                                      [this](const auto& kv) { return nodeOnScreen(kv.first); });
+        // A camera that shows only a note card is not stale either.
+        for (const auto& [id, n] : forest_.notes) {
+            if (anyVisible) break;
+            if (!noteVisible(n)) continue;
+            const Rect c = layoutNote(id).card;
+            const float x0 = pan_.x + zoom_ * c.x, y0 = pan_.y + zoom_ * c.y;
+            anyVisible = x0 + zoom_ * c.w > 0.f && y0 + zoom_ * c.h > 0.f &&
+                         x0 < winW && y0 < winH;
+        }
         if (!anyVisible && !rects_.empty()) {
             cancelPanAnim();
             pan_ = {0.f, 0.f};
@@ -1093,6 +1203,21 @@ void App::drawScene(int winW, int winH, float dpr) {
         const TaskId ringSel = previewSelect_ != 0 ? previewSelect_ : selected_;
         renderer_.drawTree(forest_, drawRects, cfg_, dv, pan_, zoom_, highlightSet_, hi, searchHits_,
                            ringSel, reparentTarget_, transActive_ ? &fade_ : nullptr);
+        // Note cards: over the tree, under the screen-space panels and the bar.
+        noteCards_.clear();
+        for (const auto& [id, n] : forest_.notes)
+            if (noteVisible(n)) noteCards_.push_back(layoutNote(id));
+        for (const NoteCardLayout& L : noteCards_) {
+            const bool ed = L.id == noteEditing_;
+            if (ed && noteField_ == NoteField::Title) keepNoteTitleCaretVisible(L);
+            const Note* n = forest_.note(L.id);
+            const TextInput& in = noteField_ == NoteField::Title ? noteTitleInput_ : noteBodyInput_;
+            renderer_.drawNoteCard(L, ed ? noteTitleInput_.text() : n->title,
+                                   ed ? noteBodyInput_.text() : n->body,
+                                   ed ? noteField_ : NoteField::None, in.caret(), in.selBegin(),
+                                   in.selEnd(), ed && caretOn(), cfg_, pan_, zoom_,
+                                   ed ? noteTitleScroll_ : 0.f);
+        }
         if (donePanel_.visible)
             renderer_.drawDonePanel(donePanel_, forest_, doneRows_, cfg_);
         renderer_.drawViewPicker(picker_, cfg_);
@@ -1122,7 +1247,8 @@ void App::drawScene(int winW, int winH, float dpr) {
         lastInputStyle_ = style;
         const Rect box = renderer_.drawInput(winW, winH, barText, input_.caret(),
                                              input_.selBegin(), input_.selEnd(),
-                                             caretOn() && !menu && descEditing_ == 0, cfg_,
+                                             caretOn() && !menu && descEditing_ == 0 &&
+                                                 noteEditing_ == 0, cfg_,
                                              style);
         inputBox_ = box;
 
@@ -1402,6 +1528,8 @@ void App::enterView(TaskId view) {
     // after going UP, the workspace we came out of is selected, so Ctrl+Down goes back in.
     cancelPanAnim();
     drag_.cancel();
+    if (noteEditing_ != 0) commitNoteEdit();   // its card is about to leave the screen
+    endNoteDrag();
     selected_ = (from != kMainView && inView(from)) ? from : 0;
     reparentTarget_ = 0;
     previewSelect_ = 0;
@@ -1554,7 +1682,7 @@ bool App::handleViewPickerClick() {
 }
 
 double App::desiredTimeout() const {
-    if (drag_.active()) return 0.0;        // poll for smooth drag
+    if (drag_.active() || noteDrag_ != 0) return 0.0;   // poll for smooth drag
     if (panAnimActive_ || transActive_) return 1.0 / 60.0; // ~60fps while things glide
     if (searchPanDue_ != 0.0)              // wake exactly when the debounced pan is due
         return std::max(0.0, searchPanDue_ - glfwGetTime());
@@ -1573,6 +1701,14 @@ void App::save() {
     // tells it which absences are real deletions. Advance the baseline only on success,
     // so a failed write is retried in full by the next save. Through the session's held
     // connection, so our own commits stay invisible to pollStore()'s change check.
+    if (noteIsNew_ && noteEditing_ != 0) {
+        // A new note being typed is not on disk until its edit commits (an empty one never
+        // is), so a save that lands meanwhile — a classification, say — leaves it out.
+        Forest f = forest_;
+        f.removeNote(noteEditing_);
+        if (session_.save(f, &lastSaved_)) lastSaved_ = std::move(f);
+        return;
+    }
     if (session_.save(forest_, &lastSaved_)) lastSaved_ = forest_;
 }
 
@@ -1580,7 +1716,9 @@ void App::pollStore() {
     // Deferred, not skipped, while a drag or an in-bar node edit is underway: reloading
     // would yank the tree out from under the user's hands. Deferral must come BEFORE the
     // changedExternally() call — that check reports each change only once.
-    if (drag_.active() || editingNode_ != 0 || descEditing_ != 0) return;
+    if (drag_.active() || editingNode_ != 0 || descEditing_ != 0 || noteEditing_ != 0 ||
+        noteDrag_ != 0)
+        return;
     const double now = glfwGetTime();
     if (now - lastStorePoll_ < kStorePollInterval) return;
     lastStorePoll_ = now;
@@ -1604,6 +1742,10 @@ void App::reloadFromStore() {
     drag_.cancel();
     editingNode_ = 0;   // the poll defers while editing; belt and braces
     descEditing_ = 0;
+    noteEditing_ = 0;
+    noteField_ = NoteField::None;
+    noteIsNew_ = false;
+    noteDrag_ = 0;
     focusNode_ = 0;
     anchorNode_ = 0;
     reparentTarget_ = 0;
@@ -1725,6 +1867,7 @@ void App::deleteSelected() {
 
 void App::afterHistoryChange() {
     drag_.cancel();
+    noteDrag_ = 0;
     focusNode_ = 0;
     reparentTarget_ = 0;
     if (!forest_.exists(selected_)) selected_ = 0;  // don't keep a ring on a vanished node
@@ -1850,6 +1993,334 @@ void App::handleDescKey(int key, int mods) {
     }
 
     if (descInput_.onKey(key, mods) == TextInput::Action::Submit) commitDescEdit();   // Ctrl+Enter
+}
+
+// ---- note cards ------------------------------------------------------------------
+
+bool App::noteVisible(const Note& n) const {
+    return n.open && forest_.noteView(n) == view_;
+}
+
+NoteCardLayout App::layoutNote(NoteId id) const {
+    const Note* n = forest_.note(id);
+    if (!n) return {};
+    if (id == noteEditing_)
+        return renderer_.layoutNoteCard(*n, noteTitleInput_.text(), noteBodyInput_.text());
+    return renderer_.layoutNoteCard(*n, n->title, n->body);
+}
+
+const NoteCardLayout* App::noteCardAt(Vec2 world) const {
+    for (auto it = noteCards_.rbegin(); it != noteCards_.rend(); ++it)   // topmost first
+        if (it->card.contains(world.x, world.y)) return &*it;
+    return nullptr;
+}
+
+std::size_t App::noteByteAt(const NoteCardLayout& L, NoteField field, Vec2 world) const {
+    if (field == NoteField::Title) {
+        const std::string& t = noteTitleInput_.text();
+        const TextRow row{0, static_cast<int>(t.size()), static_cast<int>(t.size())};
+        return byteAtX(t, row, world.x - L.title.x + noteTitleScroll_,
+                       [&](int a, int b) { return renderer_.textAdvance(t, a, b); });
+    }
+    const std::string& b = noteBodyInput_.text();
+    if (L.rows.empty() || L.lineH <= 0.f) return 0;
+    int r = static_cast<int>(std::floor((world.y - L.textTop) / L.lineH));
+    r = std::max(0, std::min(r, static_cast<int>(L.rows.size()) - 1));
+    return byteAtX(b, L.rows[r], world.x - L.tx,
+                   [&](int x, int y) { return renderer_.textAdvance(b, x, y); });
+}
+
+void App::keepNoteTitleCaretVisible(const NoteCardLayout& L) {
+    const std::string& t = noteTitleInput_.text();
+    const float caretX = renderer_.textAdvance(
+        t, 0, static_cast<int>(std::min(noteTitleInput_.caret(), t.size())));
+    const float room = std::max(0.f, L.title.w - 4.f);
+    if (caretX - noteTitleScroll_ > room) noteTitleScroll_ = caretX - room;
+    if (caretX < noteTitleScroll_) noteTitleScroll_ = caretX;
+    noteTitleScroll_ = std::max(0.f, noteTitleScroll_);
+}
+
+bool App::overScreenUi() const {
+    return pointInPanel(mouse_) || inputBox_.contains(mouse_.x, mouse_.y) ||
+           (descCard_.visible && descCard_.card.contains(mouse_.x, mouse_.y)) ||
+           picker_.button.contains(mouse_.x, mouse_.y) ||
+           (picker_.open && picker_.card.contains(mouse_.x, mouse_.y));
+}
+
+void App::createNote(const std::string& title, Vec2 world) {
+    // One editor at a time, and finish the others BEFORE the undo checkpoint, so undoing
+    // the note does not also undo a description someone just typed.
+    if (noteEditing_ != 0) commitNoteEdit();
+    if (descEditing_ != 0) commitDescEdit();
+    if (editingNode_ != 0) commitEdit(trim(input_.text()));
+    noteBefore_ = forest_;
+    const float w = Renderer::kNoteDefaultWidth;
+    const NoteId id = forest_.addNote(title, view_, world.x - w * 0.5f, world.y - 20.f, nowMs());
+    startNoteEdit(id, title.empty() ? NoteField::Title : NoteField::Body);
+    noteIsNew_ = true;   // not saved until the edit commits; an empty one just goes away
+    // Save now anyway: save() leaves the new note out, but it stores next_note_id, so a
+    // `tt note add` meanwhile cannot take this id and be overwritten by our commit.
+    save();
+    showToast("new note · Tab title ↔ text · Ctrl+Enter save · Esc cancel");
+}
+
+void App::startNoteEdit(NoteId id, NoteField field) {
+    if (noteEditing_ == id) {               // already editing this card: switch field
+        noteField_ = field;
+        noteColumnX_ = -1.f;
+        resetCaretBlink();
+        return;
+    }
+    if (noteEditing_ != 0) commitNoteEdit();
+    if (descEditing_ != 0) commitDescEdit();
+    if (editingNode_ != 0) commitEdit(trim(input_.text()));
+    const Note* n = forest_.note(id);
+    if (!n) return;
+    noteEditing_ = id;
+    noteField_ = field;
+    noteIsNew_ = false;
+    noteTitleInput_.setText(n->title);      // caret at the end, fresh text history
+    noteBodyInput_.setText(n->body);
+    noteTitleScroll_ = 0.f;
+    noteSelecting_ = false;
+    noteColumnX_ = -1.f;
+    resetCaretBlink();
+}
+
+void App::commitNoteEdit() {
+    const NoteId id = noteEditing_;
+    const bool isNew = noteIsNew_;
+    noteEditing_ = 0;
+    noteField_ = NoteField::None;
+    noteIsNew_ = false;
+    noteSelecting_ = false;
+    std::string title = trim(noteTitleInput_.text());
+    std::string body = noteBodyInput_.text();
+    noteTitleInput_.clear();
+    noteBodyInput_.clear();
+    Note* n = forest_.note(id);
+    if (!n) return;
+    // Whitespace alone is no text; anything else is kept exactly as typed.
+    if (body.find_first_not_of(" \t\r\n") == std::string::npos) body.clear();
+    if (isNew) {
+        // Never saved yet: an empty new note simply goes away, with no undo step.
+        if (title.empty() && body.empty()) { forest_.removeNote(id); return; }
+        history_.record(std::move(noteBefore_));   // one undo removes the whole note
+        n->title = std::move(title);
+        n->body = std::move(body);
+    } else {
+        if (title == n->title && body == n->body) return;   // unchanged: no undo step, no write
+        history_.snapshot(forest_);
+        n = forest_.note(id);
+        n->title = std::move(title);
+        n->body = std::move(body);
+    }
+    updatePalette();   // an open '#' list may show this title
+    save();
+}
+
+void App::cancelNoteEdit() {
+    const NoteId id = noteEditing_;
+    if (noteIsNew_) forest_.removeNote(id);   // never saved, so nothing to write
+    noteEditing_ = 0;
+    noteField_ = NoteField::None;
+    noteIsNew_ = false;
+    noteSelecting_ = false;
+    noteTitleInput_.clear();
+    noteBodyInput_.clear();
+}
+
+void App::endNoteDrag() {
+    if (noteDrag_ != 0 && noteDragMoved_) {
+        history_.record(std::move(noteDragBefore_));
+        save();
+    }
+    noteDrag_ = 0;
+    noteDragMoved_ = false;
+}
+
+void App::closeNote(NoteId id) {
+    if (noteEditing_ == id) commitNoteEdit();   // an empty new note goes away here
+    Note* n = forest_.note(id);
+    if (!n || !n->open) return;
+    history_.snapshot(forest_);
+    forest_.note(id)->open = false;
+    save();
+    showToast("note closed · # opens it again");
+}
+
+void App::deleteEditedNote() {
+    const NoteId id = noteEditing_;
+    if (noteIsNew_) { cancelNoteEdit(); return; }   // nothing saved to delete
+    cancelNoteEdit();
+    if (!forest_.note(id)) return;
+    history_.snapshot(forest_);
+    forest_.removeNote(id);
+    updatePalette();
+    save();
+    showToast("note deleted · Ctrl+Z brings it back");
+}
+
+void App::openNote(NoteId id) {
+    Note* n = forest_.note(id);
+    if (!n) return;
+    if (!n->open) {
+        history_.snapshot(forest_);
+        n->open = true;
+        save();
+    }
+    enterView(forest_.noteView(*n));   // no-op when it is already this view
+    verifyView_ = false;               // the glide below decides the camera, not a reset
+    // Bring the card into view when it is off screen (the same glide as for a node).
+    const NoteCardLayout L = layoutNote(id);
+    const float x0 = pan_.x + zoom_ * L.card.x, y0 = pan_.y + zoom_ * L.card.y;
+    const float x1 = x0 + zoom_ * L.card.w, y1 = y0 + zoom_ * L.card.h;
+    const bool onScreen = x1 > 0.f && y1 > 0.f && x0 < lastWinW_ && y0 < lastWinH_;
+    if (!onScreen)
+        startPanTo({lastWinW_ * 0.5f - zoom_ * L.card.cx(), lastWinH_ * 0.4f - zoom_ * L.card.cy()});
+}
+
+bool App::handleNoteMouse(int button, int action, int mods) {
+    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_RELEASE) {
+        if (noteSelecting_) { noteSelecting_ = false; return true; }
+        if (noteDrag_ == 0) return false;
+        const NoteId id = noteDrag_;
+        const bool moved = noteDragMoved_;
+        endNoteDrag();
+        // A press and release in place on the header is a click on the title: edit it there.
+        if (!moved && forest_.note(id)) {
+            const Vec2 w = worldMouse();
+            startNoteEdit(id, NoteField::Title);   // scroll 0: as the title was drawn
+            noteTitleInput_.moveCaretTo(noteByteAt(layoutNote(id), NoteField::Title, w), false);
+        }
+        return true;
+    }
+    if (action != GLFW_PRESS || overScreenUi()) return false;
+    const Vec2 w = worldMouse();
+    const NoteCardLayout* hit = noteCardAt(w);
+    if (!hit) return false;
+    if (button == GLFW_MOUSE_BUTTON_MIDDLE) return false;  // middle-drag pans, card or not
+    if (button != GLFW_MOUSE_BUTTON_LEFT) return true;     // swallowed: no node under it reacts
+    const NoteCardLayout L = *hit;   // a copy: the edits below can change noteCards_
+    const NoteId id = L.id;
+
+    if (L.close.contains(w.x, w.y)) { closeNote(id); return true; }
+
+    const double t = glfwGetTime();
+    const bool dbl = (t - lastClickTime_ < 0.40) && std::fabs(mouse_.x - lastClickPos_.x) < 8.f &&
+                     std::fabs(mouse_.y - lastClickPos_.y) < 8.f;
+    lastClickTime_ = dbl ? 0.0 : t;
+    lastClickPos_ = mouse_;
+
+    const bool inTitle = L.title.contains(w.x, w.y);
+    if (noteEditing_ == id && noteField_ == NoteField::Title && inTitle) {
+        // Already typing the title: the click places the caret instead of moving the card.
+    } else if (L.header.contains(w.x, w.y)) {
+        // The header is the handle: a drag moves the card, a click edits the title (on
+        // release). Finish an edit of this card first, so the move is its own undo step.
+        if (noteEditing_ == id) commitNoteEdit();
+        const Note* n = forest_.note(id);
+        if (!n) return true;   // that was an empty new note, now gone
+        noteDrag_ = id;
+        noteDragMoved_ = false;
+        noteDragGrab_ = w;
+        noteDragOrigin_ = {n->x, n->y};
+        noteDragScreen_ = mouse_;
+        noteDragBefore_ = forest_;
+        cancelPanAnim();
+        return true;
+    }
+
+    // The title (while editing it) or the body: place the caret, or select a word.
+    const NoteField field = inTitle ? NoteField::Title : NoteField::Body;
+    startNoteEdit(id, field);
+    if (noteEditing_ != id) return true;
+    TextInput& in = noteInput();
+    const std::size_t byte = noteByteAt(layoutNote(id), field, w);
+    if (dbl) {
+        in.selectWordAt(byte);
+    } else {
+        in.moveCaretTo(byte, (mods & GLFW_MOD_SHIFT) != 0);
+        noteSelecting_ = true;
+    }
+    noteColumnX_ = -1.f;
+    resetCaretBlink();
+    return true;
+}
+
+void App::handleNoteKey(int key, int mods) {
+    const bool ctrl = (mods & GLFW_MOD_CONTROL) != 0;
+    const bool shift = (mods & GLFW_MOD_SHIFT) != 0;
+    GLFWwindow* win = platform_.window();
+    const bool vertical = key == GLFW_KEY_UP || key == GLFW_KEY_DOWN;
+    if (!vertical) noteColumnX_ = -1.f;
+    resetCaretBlink();
+    TextInput& in = noteInput();
+    const bool title = noteField_ == NoteField::Title;
+
+    if (key == GLFW_KEY_ESCAPE) { cancelNoteEdit(); return; }
+    if (key == GLFW_KEY_TAB) {
+        startNoteEdit(noteEditing_, title ? NoteField::Body : NoteField::Title);
+        return;
+    }
+    if (ctrl && shift && key == GLFW_KEY_DELETE) { deleteEditedNote(); return; }
+    if (ctrl) {
+        // The card's own text history: the tree's undo stack is not touched.
+        if (key == GLFW_KEY_Z) { if (shift) in.redo(); else in.undo(); return; }
+        if (key == GLFW_KEY_Y) { in.redo(); return; }
+        if (key == GLFW_KEY_A) { in.selectAll(); return; }
+        if (key == GLFW_KEY_C || key == GLFW_KEY_X) {
+            if (in.hasSelection()) {
+                glfwSetClipboardString(win, in.selectedText().c_str());
+                if (key == GLFW_KEY_X) in.deleteSelection();
+            }
+            return;
+        }
+        if (key == GLFW_KEY_V) {
+            if (const char* clip = glfwGetClipboardString(win)) {
+                std::string text = clip;
+                if (title)   // one line: a pasted newline becomes a space
+                    std::replace_if(text.begin(), text.end(),
+                                    [](char c) { return c == '\n' || c == '\r'; }, ' ');
+                in.insert(text);
+            }
+            return;
+        }
+    }
+
+    if (title) {
+        const bool enter = key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER;
+        if (enter && ctrl) { commitNoteEdit(); return; }
+        // Enter or Down: on to the text (its caret stays where it was).
+        if (enter || key == GLFW_KEY_DOWN) { startNoteEdit(noteEditing_, NoteField::Body); return; }
+        if (in.onKey(key, mods) == TextInput::Action::Submit) commitNoteEdit();
+        return;
+    }
+
+    // Body: row-aware motion needs the wrapped layout of the text as it is now.
+    if (vertical || ((key == GLFW_KEY_HOME || key == GLFW_KEY_END) && !ctrl)) {
+        const NoteCardLayout L = layoutNote(noteEditing_);
+        const std::string& text = in.text();
+        const auto adv = [&](int a, int b) { return renderer_.textAdvance(text, a, b); };
+        if (key == GLFW_KEY_UP && !shift && rowOfByte(L.rows, in.caret()) == 0) {
+            startNoteEdit(noteEditing_, NoteField::Title);   // up from the first line: the title
+            return;
+        }
+        std::size_t to;
+        if (vertical) {
+            if (noteColumnX_ < 0.f) {
+                const int r = rowOfByte(L.rows, in.caret());
+                noteColumnX_ = adv(L.rows[r].start, static_cast<int>(in.caret()));
+            }
+            to = verticalMove(text, L.rows, in.caret(), key == GLFW_KEY_DOWN ? 1 : -1,
+                              noteColumnX_, adv);
+        } else {
+            to = key == GLFW_KEY_HOME ? rowHome(L.rows, in.caret()) : rowEnd(L.rows, in.caret());
+        }
+        in.moveCaretTo(to, shift);
+        return;
+    }
+    if (in.onKey(key, mods) == TextInput::Action::Submit) commitNoteEdit();   // Ctrl+Enter
 }
 
 } // namespace tt

@@ -277,6 +277,50 @@ private:
     void   handleDescKey(int key, int mods);
     std::size_t descByteAt(const DescCardLayout& L, Vec2 p) const;
 
+    // Note cards. A note is a card on the canvas (world coordinates, so it pans and zooms
+    // with the tasks), drawn over the tree in the view it belongs to. A click on its title or
+    // text edits that field in place; dragging the header moves the card; × closes it (kept:
+    // '#' opens it again). While a card edits, keyboard focus is the card's, as for the
+    // description card. Ctrl+N makes a new note at the cursor.
+    TextInput noteTitleInput_;          // single line
+    TextInput noteBodyInput_;           // multi-line
+    NoteId    noteEditing_ = 0;         // card being edited (0 = none)
+    NoteField noteField_ = NoteField::None;
+    bool      noteIsNew_ = false;       // made by Ctrl+N or '#', not committed yet
+    Forest    noteBefore_;              // undo checkpoint from before the new note existed
+    bool      noteSelecting_ = false;   // a left-drag in the edited field sweeps a selection
+    // How far an edited long title is shifted left. It moves only to keep the caret in view
+    // (keepNoteTitleCaretVisible), never as a side effect of a click, so a click or a drag
+    // maps the cursor through the same offset that was drawn.
+    float     noteTitleScroll_ = 0.f;
+    void      keepNoteTitleCaretVisible(const NoteCardLayout& L);
+    float     noteColumnX_ = -1.f;      // Up/Down's remembered column in the body
+    NoteId    noteDrag_ = 0;            // card whose header is held (0 = none)
+    bool      noteDragMoved_ = false;   // past the click threshold: a move, not a click
+    Vec2      noteDragGrab_;            // world cursor at the press
+    Vec2      noteDragOrigin_;          // the card's x, y at the press
+    Vec2      noteDragScreen_;          // screen cursor at the press (click threshold)
+    Forest    noteDragBefore_;          // undo checkpoint for the move
+    std::vector<NoteCardLayout> noteCards_;   // this frame's visible cards, bottom to top
+    std::vector<NoteId> noteCands_;     // rows of the '#' list
+    TextInput& noteInput() { return noteField_ == NoteField::Title ? noteTitleInput_ : noteBodyInput_; }
+    bool   noteVisible(const Note& n) const;              // open, and in the current view
+    NoteCardLayout layoutNote(NoteId id) const;           // current geometry, editor text included
+    const NoteCardLayout* noteCardAt(Vec2 world) const;   // topmost visible card under a point
+    std::size_t noteByteAt(const NoteCardLayout& L, NoteField field, Vec2 world) const;
+    bool   overScreenUi() const;        // the cursor is on the bar, a panel or a card above the canvas
+    void   createNote(const std::string& title, Vec2 world);   // new card, its title or text editing
+    void   startNoteEdit(NoteId id, NoteField field);
+    void   commitNoteEdit();
+    void   cancelNoteEdit();
+    void   endNoteDrag();               // record a finished move (undo + save)
+    void   handleNoteKey(int key, int mods);
+    bool   handleNoteMouse(int button, int action, int mods);  // true if a card took the event
+    void   closeNote(NoteId id);
+    void   deleteEditedNote();          // Ctrl+Shift+Delete while editing (undoable)
+    void   openNote(NoteId id);         // '#': open it, go to its view, bring it on screen
+    bool   hasNoteCandidate() const { return candidateIdx_ < noteCands_.size(); }
+
     std::mutex pendingMutex_;
     std::vector<std::pair<TaskId, ClassifyResult>> pending_;
 };

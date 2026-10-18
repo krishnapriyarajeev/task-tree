@@ -56,7 +56,8 @@ The process starts hidden and resident. Default hotkeys:
 
 In the overlay: type a task and press **Enter** to create it; **drag** a node onto
 another node (or the area just below it) to reparent — siblings reflow to open a gap
-and the tree snaps to its new shape. **Esc** hides the overlay.
+and the tree snaps to its new shape. **Ctrl+N** adds a note card at the cursor, and
+`#` in the bar lists your notes. **Esc** hides the overlay.
 
 > If a hotkey doesn't fire, something else already owns it: on Linux the compositor
 > (GNOME/mutter reserves most `Super` combos), on macOS the system or another app
@@ -111,6 +112,9 @@ tt done <id|query> | tt undone <id|query>
 tt status <id|query> <normal|in-progress|priority>
 tt parent <child> <parent>             # reparent (refuses cycles)
 tt rm <id|query>                       # soft delete (recoverable; see `tt deleted`)
+tt notes                               # every note (ids are separate from task ids)
+tt note add "title" ["text"]           # prints the new note id
+tt note show|edit|text|rm <id|title>   # `text` takes - for stdin, --append, --clear
 ```
 
 A node is addressed by numeric id or a unique text match (ambiguity is an error, never a

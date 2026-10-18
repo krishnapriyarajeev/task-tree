@@ -386,6 +386,57 @@ int main() {
         fs::remove_all(xdg);
     }
 
+    { // notes: add, list, show, edit, text, rm, and title-only name resolution
+        std::printf("[cli] notes\n");
+        const std::string db = tmpFile("notes.db").string();
+        removeDb(db);
+        add(db, "a task, so the store exists");
+
+        Res r = call({"note", "add", "Shopping", "milk", "--store", db});
+        CHECK(r.code == cli::kOk && r.out == "1\n", "note add prints the new note id");
+        r = call({"note", "add", "Shop hours", "--store", db});
+        CHECK(r.code == cli::kOk && r.out == "2\n", "second note");
+        Forest f;
+        CHECK(store::load(f, db) && f.notes.size() == 2 && f.size() == 1,
+              "notes saved beside the task, task untouched");
+        CHECK(f.note(1)->x != f.note(2)->x, "a second CLI note does not stack exactly on the first");
+
+        r = call({"notes", "--store", db});
+        CHECK(r.code == cli::kOk && r.out == "#1 Shopping\n#2 Shop hours\n", "notes lists all");
+        r = call({"note", "show", "shop", "--store", db});
+        CHECK(r.code == cli::kAmbiguous, "a title query that matches two notes is ambiguous");
+        r = call({"note", "show", "milk", "--store", db});
+        CHECK(r.code == cli::kNotFound, "body text never resolves a note name");
+        r = call({"note", "show", "ping", "--store", db});
+        CHECK(r.code == cli::kOk && r.out == "#1 Shopping\nmilk\n", "show prints title and text");
+
+        r = call({"note", "edit", "1", "Groceries", "--store", db});
+        CHECK(r.code == cli::kOk, "note edit");
+        r = call({"note", "text", "groc", "eggs", "--append", "--store", db});
+        CHECK(r.code == cli::kOk, "note text --append");
+        r = callIn({"note", "text", "2", "-", "--store", db}, "9-5\nclosed sun\n");
+        CHECK(r.code == cli::kOk, "note text from stdin");
+        r = call({"note", "text", "1", "--append", "--store", db});
+        CHECK(r.code == cli::kUsage, "--append needs text");
+        r = call({"note", "show", "1", "--json", "--store", db});
+        CHECK(r.code == cli::kOk && r.out.find("\"title\": \"Groceries\"") != std::string::npos &&
+              r.out.find("milk\\neggs") != std::string::npos, "show --json has title and body");
+        r = call({"note", "text", "2", "--store", db});
+        CHECK(r.code == cli::kOk && r.out == "9-5\nclosed sun\n", "text prints the body exactly");
+
+        r = call({"note", "rm", "2", "--store", db});
+        CHECK(r.code == cli::kOk, "note rm");
+        r = call({"notes", "--store", db});
+        CHECK(r.out == "#1 Groceries\n", "the removed note is gone from the list");
+        r = call({"note", "add", "Again", "--store", db});
+        CHECK(r.out == "3\n", "a removed note's id is not reused");
+        r = call({"note", "rm", "", "--store", db});
+        CHECK(r.code == cli::kUsage, "an empty note name is refused, not a match-all");
+        r = call({"note", "frob", "1", "--store", db});
+        CHECK(r.code == cli::kUsage, "unknown note verb");
+        removeDb(db);
+    }
+
     std::printf("  %d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

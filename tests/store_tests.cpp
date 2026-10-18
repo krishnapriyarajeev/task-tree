@@ -54,6 +54,21 @@ static int rawCount(const std::string& db, const char* where) {
     return n;
 }
 
+// The same for the notes table.
+static int rawNoteCount(const std::string& db, const char* where) {
+    sqlite3* h = nullptr;
+    if (sqlite3_open_v2(db.c_str(), &h, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) return -1;
+    const std::string sql = std::string("SELECT count(*) FROM notes WHERE ") + where;
+    sqlite3_stmt* s = nullptr;
+    int n = -1;
+    if (sqlite3_prepare_v2(h, sql.c_str(), -1, &s, nullptr) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_ROW)
+        n = sqlite3_column_int(s, 0);
+    sqlite3_finalize(s);
+    sqlite3_close(h);
+    return n;
+}
+
 static int rawUserVersion(const std::string& db) {
     sqlite3* h = nullptr;
     if (sqlite3_open_v2(db.c_str(), &h, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) return -1;
@@ -598,6 +613,99 @@ int main() {
         fs::remove(js);
     }
 
+    // ---- Notes: every field round-trips, edits are incremental, deletes are soft ----
+    {
+        Forest f;
+        const TaskId ws = f.addTask("work");
+        f.get(ws)->workspaceAt = 5;
+        const NoteId a = f.addNote("Groceries — é", kMainView, 12.5f, -40.f, 1700000000000);
+        f.note(a)->body = "milk\neggs\n\n  bread\n";
+        f.note(a)->w = 320.f;
+        const NoteId b = f.addNote("", ws, 0.f, 0.f);
+        f.note(b)->open = false;
+        CHECK(a == 1 && b == 2 && f.nextNoteId == 3, "note ids count from 1, apart from task ids");
+
+        Forest probe = f;
+        probe.note(a)->x += 1.f;
+        CHECK(!equivalent(f, probe), "equivalent() compares note positions");
+        probe = f;
+        probe.removeNote(b);
+        CHECK(!equivalent(f, probe), "equivalent() compares the note set");
+
+        const std::string db = tmpFile("notes.db").string();
+        removeDb(db);
+        CHECK(store::saveDb(f, db), "save notes to SQLite");
+        Forest g;
+        CHECK(store::loadDb(g, db) && equivalent(f, g), "SQLite round trip of notes is exact");
+
+        // An edit to one note writes it; a removal is a soft delete.
+        Forest base = g;
+        g.note(a)->title = "Groceries (week 2)";
+        g.removeNote(b);
+        CHECK(store::saveDb(g, db, &base), "incremental save of a note edit + delete");
+        Forest h;
+        CHECK(store::loadDb(h, db) && equivalent(g, h), "the edit and the delete landed");
+        CHECK(rawNoteCount(db, "deleted_at!=0") == 1 && rawNoteCount(db, "1") == 2,
+              "the deleted note's row is kept, stamped");
+        CHECK(h.nextNoteId == 3, "next_note_id survives the delete (no id reuse)");
+
+        // A note another writer added is in neither the baseline nor our forest: it stays.
+        Forest other = h;
+        other.addNote("from the CLI", kMainView, 0.f, 0.f);
+        CHECK(store::saveDb(other, db, &h), "another writer adds a note");
+        Forest mine = h;
+        mine.note(a)->body = "changed here";
+        CHECK(store::saveDb(mine, db, &h), "our save from an older baseline");
+        Forest k;
+        CHECK(store::loadDb(k, db) && k.notes.size() == 2 && k.note(3) &&
+              k.note(a)->body == "changed here",
+              "the other writer's note survives our incremental save");
+        removeDb(db);
+
+        const std::string js = tmpFile("notes.json").string();
+        CHECK(store::saveJson(f, js), "save notes to JSON");
+        Forest j;
+        CHECK(store::loadJson(j, js) && equivalent(f, j), "JSON round trip of notes is exact");
+        fs::remove(js);
+    }
+
+    // ---- Schema upgrade 6 -> 7: an empty notes table, tasks untouched --------------
+    {
+        const std::string db = tmpFile("schema_v6.db").string();
+        removeDb(db);
+        {
+            sqlite3* h = nullptr;
+            CHECK(sqlite3_open(db.c_str(), &h) == SQLITE_OK, "create a v6 DB");
+            const char* v6 =
+                "CREATE TABLE tasks(id INTEGER PRIMARY KEY, parent INTEGER NOT NULL DEFAULT 0,"
+                " ord INTEGER NOT NULL DEFAULT 0, text TEXT NOT NULL DEFAULT '',"
+                " collapsed INTEGER NOT NULL DEFAULT 0, status INTEGER NOT NULL DEFAULT 0,"
+                " created_at INTEGER NOT NULL DEFAULT 0, done_at INTEGER NOT NULL DEFAULT 0,"
+                " deleted_at INTEGER NOT NULL DEFAULT 0, workspace_at INTEGER NOT NULL DEFAULT 0,"
+                " description TEXT NOT NULL DEFAULT '');"
+                "CREATE TABLE meta(key TEXT PRIMARY KEY, value NOT NULL);"
+                "INSERT INTO tasks(id,parent,ord,text,description) VALUES"
+                "  (1,0,0,'root','notes here'),(2,1,0,'child','');"
+                "INSERT INTO meta VALUES('next_id',4);"
+                "PRAGMA user_version=6;";
+            CHECK(sqlite3_exec(h, v6, nullptr, nullptr, nullptr) == SQLITE_OK, "seed v6 rows");
+            sqlite3_close(h);
+        }
+        Forest g;
+        CHECK(store::loadDb(g, db), "a v6 DB loads");
+        CHECK(rawUserVersion(db) == store::supportedDbSchemaVersion(), "user_version bumped to current");
+        CHECK(g.size() == 2 && g.nextId == 4 && g.get(1)->description == "notes here",
+              "tasks untouched");
+        CHECK(g.notes.empty() && g.nextNoteId == 1, "no notes yet");
+        g.addNote("first", kMainView, 1.f, 2.f);
+        Forest base;
+        CHECK(store::loadDb(base, db), "reload the upgraded DB");
+        CHECK(store::saveDb(g, db, &base), "a note saves into the upgraded DB");
+        Forest k;
+        CHECK(store::loadDb(k, db) && equivalent(g, k), "and loads back exactly");
+        removeDb(db);
+    }
+
     // ---- Schema upgrade 5 -> 6: description column, nothing else moves -----------
     {
         const std::string db = tmpFile("schema_v5.db").string();
@@ -621,7 +729,7 @@ int main() {
         }
         Forest g;
         CHECK(store::loadDb(g, db), "a v5 DB loads");
-        CHECK(rawUserVersion(db) == 6, "user_version bumped to 6");
+        CHECK(rawUserVersion(db) == store::supportedDbSchemaVersion(), "user_version bumped to current");
         CHECK(g.size() == 2 && g.nextId == 9, "same rows, same next_id");
         CHECK(g.get(1)->description.empty() && g.get(2)->description.empty(),
               "every task starts with an empty description");

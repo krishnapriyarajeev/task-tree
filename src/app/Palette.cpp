@@ -49,6 +49,8 @@ const std::vector<ModeInfo>& modes() {
          "workspace name…"},
         {Mode::NewWorkspace, '+', "new workspace", "create a workspace inside this view",
          "name of the new workspace…"},
+        {Mode::Notes, '#', "notes", "open a note (a new title creates one)",
+         "note title…"},
     };
     return kModes;
 }
@@ -87,6 +89,10 @@ Command interpret(Mode mode, const std::string& arg) {
         case Mode::NewWorkspace:
             c.kind = Kind::NewWorkspace;
             c.body = trim(arg);
+            return c;
+        case Mode::Notes:
+            c.kind = Kind::GoNote;
+            c.query = trim(arg);
             return c;
         case Mode::Select:
         case Mode::Parent:
@@ -163,6 +169,35 @@ std::vector<TaskId> rankWorkspaces(const Forest& f, const std::string& query) {
         if (a.pos != b.pos) return a.pos < b.pos;
         if (a.len != b.len) return a.len < b.len;
         return a.order < b.order;
+    });
+    for (const Hit& h : hits) out.push_back(h.id);
+    return out;
+}
+
+std::vector<NoteId> rankNotes(const Forest& f, const std::string& query) {
+    std::vector<NoteId> out;
+    const std::string q = lower(trim(query));
+    if (q.empty()) {
+        for (const auto& [id, n] : f.notes) out.push_back(id);   // map order = creation order
+        return out;
+    }
+    struct Hit { bool inBody; std::size_t pos, len; NoteId id; };
+    std::vector<Hit> hits;
+    for (const auto& [id, n] : f.notes) {
+        const std::string lt = lower(n.title);
+        if (const std::size_t pos = lt.find(q); pos != std::string::npos) {
+            hits.push_back({false, pos, lt.size(), id});
+            continue;
+        }
+        const std::string lb = lower(n.body);
+        if (const std::size_t pos = lb.find(q); pos != std::string::npos)
+            hits.push_back({true, pos, lb.size(), id});
+    }
+    std::sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) {
+        if (a.inBody != b.inBody) return !a.inBody;
+        if (a.pos != b.pos) return a.pos < b.pos;
+        if (a.len != b.len) return a.len < b.len;
+        return a.id < b.id;
     });
     for (const Hit& h : hits) out.push_back(h.id);
     return out;
